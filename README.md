@@ -43,14 +43,16 @@ npm run dev
 
 ### コア(WASM)のビルド
 
-Rust ツールチェーン(rustup + `wasm32-unknown-unknown` ターゲット + wasm-pack)が必要。
+wasm-pack 生成物(`web/src/wasm/`)はリポジトリに同梱しているため、**clone 後に Rust 環境がなくても dev/build が動作する**。
+
+コアを変更した場合は Rust ツールチェーン(rustup + `wasm32-unknown-unknown` ターゲット + wasm-pack)で生成物を更新する:
 
 ```bash
 cd web
 npm run wasm:build   # wasm-pack build core-wasm --release --target web → src/wasm/ へ出力
 ```
 
-生成物(`web/src/wasm/`)は git 管理外。コア側の検査:
+生成物の更新漏れは CI が検知する(ビルド結果との差分検証)。コア側の検査:
 
 ```bash
 cd core

@@ -1,5 +1,2 @@
 # Rust ビルド成果物
 target/
-
-# wasm-pack 生成物(web 側で再生成)
-web/src/wasm/

@@ -44,6 +44,16 @@ jobs:
       - name: wasm-pack build
         run: wasm-pack build core-wasm --release --target web --out-dir ../web/src/wasm
 
+      - name: Verify committed artifacts match the build
+        run: |
+          # 生成物は git に同梱する(clone 後も Rust 環境なしで動かせるようにするため)。
+          # ビルド結果と差分があれば、生成物の更新漏れを失敗扱いにする
+          if [ -n "$(git status --porcelain web/src/wasm)" ]; then
+            echo "wasm artifacts are out of date. Run: cd web && npm run wasm:build"
+            git status --porcelain web/src/wasm
+            exit 1
+          fi
+
       - name: Check binary size (<= 500 KB, handoff/02 検収基準)
         run: |
           SIZE=$(stat -c%s web/src/wasm/photomosaic_core_wasm_bg.wasm)

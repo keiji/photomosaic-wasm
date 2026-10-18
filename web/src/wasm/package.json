@@ -1,0 +1,17 @@
+{
+  "name": "photomosaic-core-wasm",
+  "type": "module",
+  "description": "wasm-bindgen bindings for the photomosaic core (single .wasm for Web and Android)",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "photomosaic_core_wasm_bg.wasm",
+    "photomosaic_core_wasm.js",
+    "photomosaic_core_wasm.d.ts"
+  ],
+  "main": "photomosaic_core_wasm.js",
+  "types": "photomosaic_core_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
