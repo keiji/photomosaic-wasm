@@ -7,7 +7,7 @@
  */
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import * as wasm from '../wasm/photomosaic_core_wasm.js';
 
 const wasmBinaryUrl = new URL('../wasm/photomosaic_core_wasm_bg.wasm', import.meta.url);
@@ -133,6 +133,122 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
 
     it('rgba 長さ不一致はエラーになる', () => {
       expect(() => wasm.set_main_image(new Uint8Array(3), 2, 2)).toThrow();
+    });
+  });
+
+  describe('タイル取り込み(P2: handoff/04 M3)', () => {
+    /** 単色の特徴量サムネイル(32×32)を生成する */
+    const featureThumb = (r: number, g: number, b: number): Uint8Array => {
+      const data = new Uint8Array(32 * 32 * 4);
+      for (let offset = 0; offset < data.length; offset += 4) {
+        data[offset] = r;
+        data[offset + 1] = g;
+        data[offset + 2] = b;
+        data[offset + 3] = 255;
+      }
+      return data;
+    };
+
+    /** 単色の合成用サムネイルを生成する */
+    const composeThumb = (w: number, h: number): Uint8Array => new Uint8Array(w * h * 4);
+
+    afterEach(() => {
+      wasm.clear_tiles();
+    });
+
+    it('add_tile でタイルが登録され、TileInfo が返る', () => {
+      const info = wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 32), 64, 32);
+      try {
+        expect(info.id).toBe(1n);
+        expect(info.thumb_w).toBe(64);
+        expect(info.thumb_h).toBe(32);
+        expect(info.usage).toBe(0);
+        // 単色赤の CIELAB: L* ≈ 53.24(既知値、詳細設計書 11 章)
+        const [l, a, b] = Array.from(info.mean_lab);
+        expect(l).toBeCloseTo(53.24, 1);
+        expect(a).toBeCloseTo(80.09, 1);
+        expect(b).toBeCloseTo(67.2, 1);
+        // 単色なので detail は 0
+        expect(info.detail).toBeCloseTo(0, 4);
+      } finally {
+        info.free();
+      }
+      expect(wasm.get_tile_count()).toBe(1);
+      expect(wasm.get_tiles_memory_bytes()).toBe(64 * 32 * 4);
+    });
+
+    it('同一 id の追加は置き換わり、メモリ量が二重計上されない', () => {
+      wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 64), 64, 64);
+      wasm.add_tile(1n, featureThumb(0, 0, 255), composeThumb(32, 32), 32, 32);
+      expect(wasm.get_tile_count()).toBe(1);
+      expect(wasm.get_tiles_memory_bytes()).toBe(32 * 32 * 4);
+    });
+
+    it('remove_tile / clear_tiles / get_tile_count が連携する', () => {
+      wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 64), 64, 64);
+      wasm.add_tile(2n, featureThumb(0, 255, 0), composeThumb(64, 64), 64, 64);
+      expect(wasm.get_tile_count()).toBe(2);
+      wasm.remove_tile(1n);
+      expect(wasm.get_tile_count()).toBe(1);
+      expect(wasm.get_tiles_memory_bytes()).toBe(64 * 64 * 4);
+      wasm.clear_tiles();
+      expect(wasm.get_tile_count()).toBe(0);
+      expect(wasm.get_tiles_memory_bytes()).toBe(0);
+    });
+
+    it('存在しない id の remove_tile はエラーになる', () => {
+      expect(() => wasm.remove_tile(999n)).toThrow(/unknown tile id/);
+    });
+
+    it('特徴量サムネイルの寸法が 32×32 以外ならエラーになる', () => {
+      const wrong = new Uint8Array(31 * 31 * 4);
+      expect(() => wasm.add_tile(1n, wrong, composeThumb(32, 32), 32, 32)).toThrow(
+        /feature thumbnail/,
+      );
+      expect(wasm.get_tile_count()).toBe(0);
+    });
+
+    it('合成サムネイルの長辺 65(上限 64 超)はエラーになる', () => {
+      expect(() => wasm.add_tile(1n, featureThumb(1, 2, 3), composeThumb(65, 1), 65, 1)).toThrow(
+        /compose thumbnail/,
+      );
+      expect(wasm.get_tile_count()).toBe(0);
+    });
+
+    it('コントラスト付きタイルの detail が大きくなる', () => {
+      const data = new Uint8Array(32 * 32 * 4);
+      for (let y = 0; y < 32; y++) {
+        for (let x = 0; x < 32; x++) {
+          const v = x < 16 ? 0 : 255;
+          const offset = (y * 32 + x) * 4;
+          data[offset] = v;
+          data[offset + 1] = v;
+          data[offset + 2] = v;
+          data[offset + 3] = 255;
+        }
+      }
+      const info = wasm.add_tile(1n, data, composeThumb(32, 32), 32, 32);
+      try {
+        // 半々の明度反転 → L* の標準偏差は 50 前後
+        expect(info.detail).toBeGreaterThan(40);
+      } finally {
+        info.free();
+      }
+    });
+
+    it('300 枚のタイルを 1 枚あたり数 ms 未満で解析できる(M3 完了条件のリグレッション検知)', () => {
+      // 完了条件(handoff/04 M3): 300 枚程度で UI が固まらず、1 枚あたり数 ms。
+      // P2 の性能目標(300 枚 200ms 以内 = 約 0.67ms/枚)に対し、
+      // 環境差を考慮した緩い上限(1 枚あたり 5ms)で検知する。
+      const feature = featureThumb(120, 130, 140);
+      const start = performance.now();
+      for (let i = 0; i < 300; i++) {
+        const info = wasm.add_tile(BigInt(i), feature, composeThumb(64, 64), 64, 64);
+        info.free();
+      }
+      const perTileMs = (performance.now() - start) / 300;
+      expect(wasm.get_tile_count()).toBe(300);
+      expect(perTileMs).toBeLessThan(5);
     });
   });
 });

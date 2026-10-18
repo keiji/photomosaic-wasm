@@ -7,7 +7,7 @@
 //!   - ブロック内 L*(明度)の標準偏差(`detail`、0..128)
 //!   - 有効画素数を `weight` に記録(半端ブロックは block_size² 未満)
 
-use crate::color::{linear_rgb_to_lstar, srgb8_to_linear};
+use crate::color::linear_rgb_to_lstar;
 
 /// ブロックサイズの既定値(詳細設計書 5 章 block_size)
 pub const DEFAULT_BLOCK_SIZE: u32 = 24;
@@ -56,18 +56,6 @@ pub struct BlockFeature {
     pub weight: f32,
 }
 
-/// sRGB → 線形 RGB の 256 値ルックアップテーブル(計算量削減用)
-fn linear_lut() -> &'static [f64; 256] {
-    static LUT: std::sync::OnceLock<[f64; 256]> = std::sync::OnceLock::new();
-    LUT.get_or_init(|| {
-        let mut table = [0.0_f64; 256];
-        for (i, slot) in table.iter_mut().enumerate() {
-            *slot = srgb8_to_linear(i as u8);
-        }
-        table
-    })
-}
-
 /// メイン画像全体のブロック特徴量を計算する(P1)。
 ///
 /// `rgba` は R→G→B→A 順・行優先の 1 ピクセル 4 バイト。長さは width * height * 4。
@@ -84,7 +72,7 @@ pub fn compute_block_features(
         "rgba buffer length mismatch"
     );
 
-    let lut = linear_lut();
+    let lut = crate::color::srgb8_linear_lut();
     let mut features = Vec::with_capacity(grid.total_blocks as usize);
 
     for row in 0..grid.rows {
@@ -211,7 +199,7 @@ mod tests {
     fn detail_reflects_contrast() {
         // 左半分黒・右半分白のブロックは detail が大きい
         let mut rgba = Vec::new();
-        for y in 0..8 {
+        for _y in 0..8 {
             for x in 0..8 {
                 let v = if x < 4 { 0 } else { 255 };
                 rgba.extend_from_slice(&[v, v, v, 255]);

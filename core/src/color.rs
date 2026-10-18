@@ -96,6 +96,19 @@ pub fn linear_rgb_to_lstar(r: f64, g: f64, b: f64) -> f64 {
     xyz_to_lab(D65_X * y, y, D65_Z * y)[0]
 }
 
+/// sRGB → 線形 RGB の 256 値ルックアップテーブル(計算量削減用)。
+/// ブロック特徴量(grid.rs)とタイル特徴量(tile.rs)で共有する
+pub(crate) fn srgb8_linear_lut() -> &'static [f64; 256] {
+    static LUT: std::sync::OnceLock<[f64; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut table = [0.0_f64; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            *slot = srgb8_to_linear(i as u8);
+        }
+        table
+    })
+}
+
 /// CIE Lab の f 関数
 fn lab_f(t: f64) -> f64 {
     const DELTA: f64 = 6.0 / 29.0;

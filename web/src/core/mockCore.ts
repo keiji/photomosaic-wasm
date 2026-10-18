@@ -7,13 +7,23 @@
  *
  * M1 以降は WASM 実装のフォールバックとしても使う(bridge.ts が差し替える)。
  */
-import type { CoreBridge, GridInfo, ProgressCallback, ProgressEvent, RgbaImage } from './types';
+import type {
+  CoreBridge,
+  GridInfo,
+  ProgressCallback,
+  ProgressEvent,
+  RgbaImage,
+  TileInfo,
+} from './types';
 
 /** ブロックサイズの既定値(詳細設計書 5 章 block_size) */
 export const DEFAULT_BLOCK_SIZE = 24;
 
 /** 進捗デモのダミー総ブロック数(見た目の確認用) */
 export const PROGRESS_DEMO_TOTAL_BLOCKS = 1000;
+
+/** モックのメモリガード上限(詳細設計書 5 章 memory_guard に合わせる) */
+const MOCK_MEMORY_GUARD_BYTES = 512 * 1024 * 1024;
 
 /**
  * モック簡易版の overall_ratio。フェーズ内進捗をそのまま使う
@@ -83,6 +93,14 @@ export function createMockCore(): CoreBridge {
   const progressListeners = new Set<ProgressCallback>();
   let demoTimer: ReturnType<typeof setInterval> | null = null;
 
+  // --- タイルプール(M3): 特徴量は WASM 実装の簡易版(sRGB 単純平均) ---
+  interface MockTile {
+    info: TileInfo;
+    compose: RgbaImage;
+  }
+  const tiles = new Map<bigint, MockTile>();
+  let tilesMemoryBytes = 0;
+
   const emit = (event: ProgressEvent): void => {
     for (const listener of progressListeners) {
       listener(event);
@@ -143,6 +161,76 @@ export function createMockCore(): CoreBridge {
 
     clearMainImage(): void {
       mainImage = null;
+    },
+
+    async addTile(id: bigint, feature: RgbaImage, compose: RgbaImage): Promise<TileInfo> {
+      // 簡易特徴量: sRGB 単純平均(WASM 実装では線形平均 → CIELAB)
+      const pixelCount = feature.width * feature.height;
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      for (let offset = 0; offset < pixelCount * 4; offset += 4) {
+        sumR += feature.data[offset] as number;
+        sumG += feature.data[offset + 1] as number;
+        sumB += feature.data[offset + 2] as number;
+      }
+      const meanR = sumR / pixelCount;
+      const meanG = sumG / pixelCount;
+      const meanB = sumB / pixelCount;
+
+      // 簡易 detail: 最大/最小輝度(0..255)差を L* スケール(0..128)へ粗く写像
+      let minLum = 255;
+      let maxLum = 0;
+      for (let offset = 0; offset < pixelCount * 4; offset += 4) {
+        const lum =
+          0.299 * (feature.data[offset] as number) +
+          0.587 * (feature.data[offset + 1] as number) +
+          0.114 * (feature.data[offset + 2] as number);
+        minLum = Math.min(minLum, lum);
+        maxLum = Math.max(maxLum, lum);
+      }
+
+      const composeBytes = compose.width * compose.height * 4;
+      const existing = tiles.get(id);
+      const nextBytes =
+        tilesMemoryBytes - (existing ? existing.compose.data.byteLength : 0) + composeBytes;
+      if (nextBytes > MOCK_MEMORY_GUARD_BYTES) {
+        throw new Error('memory guard exceeded');
+      }
+
+      const info: TileInfo = {
+        id,
+        thumbWidth: compose.width,
+        thumbHeight: compose.height,
+        meanLab: [meanR, meanG, meanB], // モック簡易実装: 線形 Lab 変換はしない
+        detail: ((maxLum - minLum) / 255) * 128,
+        usage: 0,
+      };
+      tiles.set(id, { info, compose });
+      tilesMemoryBytes = nextBytes;
+      return info;
+    },
+
+    async removeTile(id: bigint): Promise<void> {
+      const existing = tiles.get(id);
+      if (!existing) {
+        throw new Error(`unknown tile id: ${id}`);
+      }
+      tilesMemoryBytes -= existing.compose.data.byteLength;
+      tiles.delete(id);
+    },
+
+    clearTiles(): void {
+      tiles.clear();
+      tilesMemoryBytes = 0;
+    },
+
+    getTileCount(): number {
+      return tiles.size;
+    },
+
+    getTilesMemoryBytes(): number {
+      return tilesMemoryBytes;
     },
 
     async exportImage(): Promise<RgbaImage> {

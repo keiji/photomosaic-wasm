@@ -72,8 +72,10 @@ export interface AppStoreData {
   totalBlocks: number | null;
   /** 割り当て済み(マッチ済み)ブロック数 */
   assignedBlocks: number;
-  /** 構成画像の枚数(M0 では常に 0) */
+  /** 構成画像の枚数 */
   tileCount: number;
+  /** 合成用サムネイルの合計バイト数(メモリガードの監視値) */
+  tilesBytes: number;
 }
 
 export const initialStoreData: AppStoreData = {
@@ -81,6 +83,7 @@ export const initialStoreData: AppStoreData = {
   totalBlocks: null,
   assignedBlocks: 0,
   tileCount: 0,
+  tilesBytes: 0,
 };
 
 /** ストア(状態 + 通知)。UI から直接状態を書き換えさせない */
@@ -116,6 +119,15 @@ export class AppStore {
    */
   setBlockCounts(totalBlocks: number, assignedBlocks: number): void {
     this.data = { ...this.data, totalBlocks, assignedBlocks };
+    this.notify();
+  }
+
+  /**
+   * 構成画像の枚数・メモリ使用量を更新する(状態遷移を伴わないデータ更新)。
+   * タイルの追加・削除のたびに UI 層が呼ぶ。
+   */
+  setTileStats(tileCount: number, tilesBytes: number): void {
+    this.data = { ...this.data, tileCount, tilesBytes };
     this.notify();
   }
 

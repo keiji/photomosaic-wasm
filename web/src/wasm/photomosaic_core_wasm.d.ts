@@ -31,6 +31,27 @@ export class JsProgressEvent {
 }
 
 /**
+ * タイル情報(詳細設計書 3 章 TileFeature の JS 輸出)
+ */
+export class JsTileInfo {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    readonly detail: number;
+    /**
+     * アプリ側が採番したタイル ID(JS では bigint として扱う)
+     */
+    readonly id: bigint;
+    /**
+     * CIELAB 平均 (L*, a*, b*)
+     */
+    readonly mean_lab: Float32Array;
+    readonly thumb_h: number;
+    readonly thumb_w: number;
+    readonly usage: number;
+}
+
+/**
  * 進捗デモ用のスロットル判定(ダミー処理を 16ms 間隔のバッチに区切って進める)。
  *
  * JS 側のタイマーから現在時刻とダミー処理の進行率を渡すと、コア内の
@@ -59,9 +80,24 @@ export class ProgressDemo {
 export function add(a: number, b: number): number;
 
 /**
+ * P2 タイル解析: タイル 1 枚を解析してタイルプールへ登録する。
+ *
+ * - `id`: アプリ側が採番したタイル ID(既存と重複する場合は置き換える)
+ * - `feature_rgba`: 特徴量用サムネイル(32×32 固定。ホスト側でボックスフィルタ縮小済み)
+ * - `compose_rgba`: 合成用サムネイル(長辺 64 上限、アスペクト維持。P4 合成用に保持)
+ * - メモリガード超過時はエラーになり、プールは変更されない
+ */
+export function add_tile(id: bigint, feature_rgba: Uint8Array, compose_rgba: Uint8Array, compose_w: number, compose_h: number): JsTileInfo;
+
+/**
  * メイン画像の状態を破棄する(リセット操作に対応。大容量バッファを開放する)
  */
 export function clear_main_image(): void;
+
+/**
+ * タイルプールを空にする(リセット操作に対応。合成用サムネイルを解放する)
+ */
+export function clear_tiles(): void;
 
 /**
  * 現時点の完成画像(または解析対象のメイン画像)RGBA を返す(P5 のエンコード前段)。
@@ -79,9 +115,24 @@ export function export_main_image(): Uint8Array;
 export function get_block_mean_colors(): Uint8Array;
 
 /**
+ * 登録済みタイル数(進捗の分母・UI の枚数表示に使用)
+ */
+export function get_tile_count(): number;
+
+/**
+ * 合成用サムネイルの合計バイト数(メモリガードの監視値。wasm32 では 4 GB 未満)
+ */
+export function get_tiles_memory_bytes(): number;
+
+/**
  * コアバージョン(Web と Android で同一の .wasm を使うための整合確認用)
  */
 export function get_version(): string;
+
+/**
+ * プールからタイルを削除する(M3 ではマッチ結果が存在しないため再マッチ対象なし)
+ */
+export function remove_tile(id: bigint): void;
 
 /**
  * P1 再実行: ブロックサイズを変更してグリッド・ブロック特徴量を再計算する
@@ -102,11 +153,16 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_jsgridinfo_free: (a: number, b: number) => void;
     readonly __wbg_jsprogressevent_free: (a: number, b: number) => void;
+    readonly __wbg_jstileinfo_free: (a: number, b: number) => void;
     readonly __wbg_progressdemo_free: (a: number, b: number) => void;
     readonly add: (a: number, b: number) => number;
+    readonly add_tile: (a: number, b: bigint, c: number, d: number, e: number, f: number, g: number, h: number) => void;
     readonly clear_main_image: () => void;
+    readonly clear_tiles: () => void;
     readonly export_main_image: (a: number) => void;
     readonly get_block_mean_colors: (a: number) => void;
+    readonly get_tile_count: () => number;
+    readonly get_tiles_memory_bytes: () => number;
     readonly get_version: (a: number) => void;
     readonly jsgridinfo_block_size: (a: number) => number;
     readonly jsgridinfo_cols: (a: number) => number;
@@ -119,13 +175,20 @@ export interface InitOutput {
     readonly jsprogressevent_phase_code: (a: number, b: number) => void;
     readonly jsprogressevent_phase_ratio: (a: number) => number;
     readonly jsprogressevent_total_blocks: (a: number) => number;
+    readonly jstileinfo_detail: (a: number) => number;
+    readonly jstileinfo_id: (a: number) => bigint;
+    readonly jstileinfo_mean_lab: (a: number, b: number) => void;
+    readonly jstileinfo_thumb_h: (a: number) => number;
+    readonly jstileinfo_thumb_w: (a: number) => number;
+    readonly jstileinfo_usage: (a: number) => number;
     readonly progressdemo_new: (a: number) => number;
     readonly progressdemo_tick: (a: number, b: number, c: number) => number;
+    readonly remove_tile: (a: number, b: bigint) => void;
     readonly set_block_size: (a: number, b: number) => void;
     readonly set_main_image: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
-    readonly __wbindgen_export: (a: number, b: number, c: number) => void;
-    readonly __wbindgen_export2: (a: number, b: number) => number;
+    readonly __wbindgen_export: (a: number, b: number) => number;
+    readonly __wbindgen_export2: (a: number, b: number, c: number) => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

@@ -7,7 +7,7 @@
  * - コアの状態(メイン画像・ブロック特徴量)は WASM 内に保持される
  */
 import { createMockCore } from './mockCore';
-import type { CoreBridge, GridInfo, ProgressCallback, ProgressEvent } from './types';
+import type { CoreBridge, GridInfo, ProgressCallback, ProgressEvent, TileInfo } from './types';
 
 /** コア実装の種類(デバッグ表示用) */
 export type CoreImplementation = 'mock' | 'wasm';
@@ -38,6 +38,29 @@ function toGridInfo(info: {
   };
   info.free();
   return grid;
+}
+
+/** wasm-bindgen の JsTileInfo を型付き TileInfo へ写す(寿命管理のため free する) */
+function toTileInfo(info: {
+  free(): void;
+  readonly id: bigint;
+  readonly thumb_w: number;
+  readonly thumb_h: number;
+  readonly mean_lab: Float32Array;
+  readonly detail: number;
+  readonly usage: number;
+}): TileInfo {
+  const tile: TileInfo = {
+    id: info.id,
+    thumbWidth: info.thumb_w,
+    thumbHeight: info.thumb_h,
+    // mean_lab はコアの [f32; 3] 固定(詳細設計書 3 章)なので 3 要素は常に存在する
+    meanLab: [info.mean_lab[0] as number, info.mean_lab[1] as number, info.mean_lab[2] as number],
+    detail: info.detail,
+    usage: info.usage,
+  };
+  info.free();
+  return tile;
 }
 
 /** WASM 実装をロードして構築する(失敗時は例外を投げ、呼び出し側でモックへフォールバック) */
@@ -78,6 +101,38 @@ async function createWasmCore(): Promise<CoreBridge> {
 
     getBlockMeanColors(): Uint8Array {
       return wasm.get_block_mean_colors();
+    },
+
+    async addTile(id: bigint, feature, compose): Promise<TileInfo> {
+      // Vec<u8> 引数への転送は wasm-bindgen がコピー 1 回で行う(handoff/02 2.4)
+      const featureBytes = new Uint8Array(
+        feature.data.buffer,
+        feature.data.byteOffset,
+        feature.data.byteLength,
+      );
+      const composeBytes = new Uint8Array(
+        compose.data.buffer,
+        compose.data.byteOffset,
+        compose.data.byteLength,
+      );
+      const info = wasm.add_tile(id, featureBytes, composeBytes, compose.width, compose.height);
+      return toTileInfo(info);
+    },
+
+    async removeTile(id: bigint): Promise<void> {
+      wasm.remove_tile(id);
+    },
+
+    clearTiles(): void {
+      wasm.clear_tiles();
+    },
+
+    getTileCount(): number {
+      return wasm.get_tile_count();
+    },
+
+    getTilesMemoryBytes(): number {
+      return wasm.get_tiles_memory_bytes();
     },
 
     clearMainImage(): void {

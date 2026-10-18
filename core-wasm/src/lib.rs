@@ -9,6 +9,7 @@ use photomosaic_core::grid::{
     compute_block_features, compute_grid_info, BlockFeature, GridInfo, DEFAULT_BLOCK_SIZE,
 };
 use photomosaic_core::progress::{Phase, PhasePlan, ProgressThrottle};
+use photomosaic_core::tile::{TileFeature, TilePool};
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 
@@ -23,6 +24,9 @@ struct MainImageState {
 thread_local! {
     // WASM はシングルスレッドで動く(詳細設計書 8.1)ため thread_local + RefCell で十分
     static MAIN_IMAGE: RefCell<Option<MainImageState>> = const { RefCell::new(None) };
+
+    /// タイルプール(P2 で解析したタイルの集合。P4 合成用サムネイルも保持)
+    static TILE_POOL: RefCell<TilePool> = RefCell::new(TilePool::new());
 }
 
 /// JS 例外(Error インスタンス)を生成する。
@@ -279,4 +283,118 @@ impl JsProgressEvent {
     pub fn total_blocks(&self) -> u32 {
         self.total_blocks
     }
+}
+
+/// タイル情報(詳細設計書 3 章 TileFeature の JS 輸出)
+#[wasm_bindgen]
+pub struct JsTileInfo {
+    id: u64,
+    thumb_w: u32,
+    thumb_h: u32,
+    mean_lab: [f32; 3],
+    detail: f32,
+    usage: u32,
+}
+
+impl JsTileInfo {
+    fn from_feature(feature: TileFeature) -> JsTileInfo {
+        JsTileInfo {
+            id: feature.id,
+            thumb_w: feature.thumb_w,
+            thumb_h: feature.thumb_h,
+            mean_lab: feature.mean_lab,
+            detail: feature.detail,
+            usage: feature.usage,
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl JsTileInfo {
+    /// アプリ側が採番したタイル ID(JS では bigint として扱う)
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn thumb_w(&self) -> u32 {
+        self.thumb_w
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn thumb_h(&self) -> u32 {
+        self.thumb_h
+    }
+
+    /// CIELAB 平均 (L*, a*, b*)
+    #[wasm_bindgen(getter)]
+    pub fn mean_lab(&self) -> Vec<f32> {
+        self.mean_lab.to_vec()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn detail(&self) -> f32 {
+        self.detail
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn usage(&self) -> u32 {
+        self.usage
+    }
+}
+
+/// P2 タイル解析: タイル 1 枚を解析してタイルプールへ登録する。
+///
+/// - `id`: アプリ側が採番したタイル ID(既存と重複する場合は置き換える)
+/// - `feature_rgba`: 特徴量用サムネイル(32×32 固定。ホスト側でボックスフィルタ縮小済み)
+/// - `compose_rgba`: 合成用サムネイル(長辺 64 上限、アスペクト維持。P4 合成用に保持)
+/// - メモリガード超過時はエラーになり、プールは変更されない
+#[wasm_bindgen]
+pub fn add_tile(
+    id: u64,
+    feature_rgba: Vec<u8>,
+    compose_rgba: Vec<u8>,
+    compose_w: u32,
+    compose_h: u32,
+) -> Result<JsTileInfo, JsValue> {
+    TILE_POOL.with(|cell| {
+        let mut pool = cell.borrow_mut();
+        pool.add_tile(id, &feature_rgba, &compose_rgba, compose_w, compose_h)
+            .map(JsTileInfo::from_feature)
+            .map_err(|err| js_error(&err.to_string()))
+    })
+}
+
+/// プールからタイルを削除する(M3 ではマッチ結果が存在しないため再マッチ対象なし)
+#[wasm_bindgen]
+pub fn remove_tile(id: u64) -> Result<(), JsValue> {
+    TILE_POOL.with(|cell| {
+        cell.borrow_mut()
+            .remove_tile(id)
+            .map_err(|err| js_error(&err.to_string()))
+    })
+}
+
+/// タイルプールを空にする(リセット操作に対応。合成用サムネイルを解放する)
+#[wasm_bindgen]
+pub fn clear_tiles() {
+    TILE_POOL.with(|cell| {
+        cell.borrow_mut().clear();
+    });
+}
+
+/// 登録済みタイル数(進捗の分母・UI の枚数表示に使用)
+#[wasm_bindgen]
+pub fn get_tile_count() -> u32 {
+    TILE_POOL.with(|cell| cell.borrow().tile_count())
+}
+
+/// 合成用サムネイルの合計バイト数(メモリガードの監視値。wasm32 では 4 GB 未満)
+#[wasm_bindgen]
+pub fn get_tiles_memory_bytes() -> u32 {
+    TILE_POOL.with(|cell| {
+        let total = cell.borrow().total_compose_bytes();
+        u32::try_from(total).unwrap_or(u32::MAX)
+    })
 }

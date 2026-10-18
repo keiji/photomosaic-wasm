@@ -6,7 +6,7 @@
  * 処理はすべてモックコア(グリッド計算のみ)で、WASM は M1 以降に接続する。
  */
 import './style.css';
-import { InvalidFileError, loadMainImage } from './io/imageLoader';
+import { InvalidFileError, loadMainImage, loadTile } from './io/imageLoader';
 import { buildDownloadFilename, downloadBlob, encodePng } from './io/exporter';
 import { createCoreBridge, getCoreImplementation } from './core/bridge';
 import { AppStore } from './state/store';
@@ -16,6 +16,10 @@ import { setupFileZone } from './ui/dropZone';
 import { Preview } from './ui/preview';
 import { ProgressPanel } from './ui/progress';
 import { Controls } from './ui/controls';
+import { TileList } from './ui/tileList';
+
+/** タイル追加処理の 1 バッチあたりの枚数(バッチ間で UI に制御を返す) */
+const TILE_BATCH_SIZE = 8;
 
 function requireElement<T extends HTMLElement>(selector: string): T {
   const el = document.querySelector<T>(selector);
@@ -36,6 +40,7 @@ function applyMessages(): void {
   requireElement<HTMLElement>('#back-button').textContent = messages.back;
   requireElement<HTMLElement>('#save-button').textContent = messages.save;
   requireElement<HTMLElement>('#block-size-label').textContent = messages.blockSizeLabel;
+  requireElement<HTMLButtonElement>('#tile-add-edit').textContent = messages.tileAdd;
   requireElement<HTMLCanvasElement>('#preview-canvas').setAttribute(
     'aria-label',
     messages.previewAriaLabel,
@@ -55,6 +60,10 @@ async function main(): Promise<void> {
   const screenEdit = requireElement<HTMLElement>('#screen-edit');
   const errorNotice = requireElement<HTMLElement>('#error-notice');
   const tileSummary = requireElement<HTMLElement>('#tile-summary');
+  const tileMemory = requireElement<HTMLElement>('#tile-memory');
+  const tilesReadyHint = requireElement<HTMLElement>('#tiles-ready-hint');
+  const tileListStartContainer = requireElement<HTMLElement>('#tile-list-start');
+  const tileListEditContainer = requireElement<HTMLElement>('#tile-list-edit');
 
   const preview = new Preview(requireElement<HTMLCanvasElement>('#preview-canvas'));
   const progress = new ProgressPanel(requireElement<HTMLElement>('#progress-section'));
@@ -105,9 +114,16 @@ async function main(): Promise<void> {
     // 有効にしてエクスポート経路の動作確認を可能にしている(M4 で本仕様に揃える)。
     controls.setSaveEnabled(inEdit);
 
-    tileSummary.textContent = messages.tileSummary(data.tileCount);
+    // タイル一覧は S1(TILES_READY 含む)/S2 の両方で操作できるよう表示位置を移動する
+    tileList.attachTo(inEdit ? tileListEditContainer : tileListStartContainer);
 
-    if (data.state === 'MAIN_READY' || data.state === 'GENERATING' || data.state === 'DONE') {
+    tileSummary.textContent = messages.tileSummary(data.tileCount);
+    tileMemory.textContent = messages.tileMemoryLabel(data.tilesBytes);
+
+    // TILES_READY: 構成画像のみ設定済み → メイン画像の設定を案内する(基本設計書 1.4)
+    tilesReadyHint.hidden = data.state !== 'TILES_READY';
+
+    if (inEdit) {
       progress.setCounts(data.assignedBlocks, data.totalBlocks ?? 0);
     }
   };
@@ -138,6 +154,104 @@ async function main(): Promise<void> {
         progress.reset();
       }
     },
+  });
+
+  // --- タイル一覧(サムネイル + 個別削除。S1/S2 で表示位置を移動する) ---
+  // タイル ID はアプリ側採番(コア API の u64 に対応し bigint を用いる)
+  let nextTileId = 0n;
+  const tileUrls = new Map<bigint, string>();
+  const tileList = new TileList(tileListStartContainer, {
+    onRemove: (id) => void removeTile(id),
+    removeLabelFor: (id) => messages.tileRemoveLabel(id),
+  });
+
+  const syncTileStats = (): void => {
+    store.setTileStats(core.getTileCount(), core.getTilesMemoryBytes());
+  };
+
+  const revokeTileUrl = (id: bigint): void => {
+    const url = tileUrls.get(id);
+    if (url !== undefined) {
+      URL.revokeObjectURL(url);
+      tileUrls.delete(id);
+    }
+  };
+
+  /** UI スレッドへ制御を返す(大量タイル追加中も描画・操作を固めさせない) */
+  const yieldToUi = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+  const removeTile = async (id: bigint): Promise<void> => {
+    try {
+      await core.removeTile(id);
+      tileList.removeTile(id);
+      revokeTileUrl(id);
+      syncTileStats();
+      store.dispatch({ type: 'TILES_REMOVED', remaining: core.getTileCount() });
+    } catch (err) {
+      console.error('removeTile failed', err);
+      showError(messages.errorLoadFailed);
+    }
+  };
+
+  // --- 構成画像の受け付け(複数ファイル: 検証 → デコード → サムネイル化 → コア解析) ---
+  const addTileFiles = async (files: File[]): Promise<void> => {
+    if (files.length === 0) return;
+    clearError();
+    progress.setPhase(messages.phaseTileAnalyze);
+
+    let added = 0;
+    let rejected = 0;
+    let guardExceeded = false;
+
+    // 大量追加でも UI が固まらないよう、小バッチごとに制御を返す(handoff/04 M3)
+    for (let start = 0; start < files.length; start += TILE_BATCH_SIZE) {
+      const batch = files.slice(start, start + TILE_BATCH_SIZE);
+      for (const file of batch) {
+        if (guardExceeded) {
+          rejected += 1;
+          continue;
+        }
+        try {
+          const thumbs = await loadTile(file);
+          const id = nextTileId;
+          nextTileId += 1n;
+          const info = await core.addTile(id, thumbs.feature, thumbs.compose);
+          const url = URL.createObjectURL(file);
+          tileUrls.set(info.id, url);
+          tileList.addTile(info.id, url);
+          added += 1;
+        } catch (err) {
+          if (err instanceof Error && err.message.includes('memory guard exceeded')) {
+            // メモリガード超過(詳細設計書 5 章 memory_guard): 以降の追加を停止する
+            guardExceeded = true;
+          } else {
+            console.error('tile load failed', err);
+            rejected += 1;
+          }
+        }
+      }
+      await yieldToUi();
+    }
+
+    if (added > 0) {
+      store.dispatch({ type: 'TILES_ADDED', count: added });
+    }
+    syncTileStats();
+    if (guardExceeded) {
+      showError(messages.errorMemoryGuard);
+    } else if (rejected > 0) {
+      showError(messages.tilesPartiallyAdded(added, rejected));
+    }
+    progress.reset();
+  };
+
+  setupFileZone(requireElement<HTMLElement>('#tile-drop-zone'), {
+    multiple: true,
+    onFiles: (files) => void addTileFiles(files),
+  });
+  setupFileZone(requireElement<HTMLButtonElement>('#tile-add-edit'), {
+    multiple: true,
+    onFiles: (files) => void addTileFiles(files),
   });
 
   // --- S2: ブロックサイズ変更(300ms デバウンス後にグリッド再計算) ---
@@ -171,6 +285,13 @@ async function main(): Promise<void> {
   const reset = (): void => {
     store.dispatch({ type: 'RESET' });
     core.clearMainImage();
+    core.clearTiles();
+    tileList.clear();
+    for (const url of tileUrls.values()) {
+      URL.revokeObjectURL(url);
+    }
+    tileUrls.clear();
+    nextTileId = 0n;
     clearError();
     progress.reset();
     controls.setBlockSizeValue(24);

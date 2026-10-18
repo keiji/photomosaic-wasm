@@ -115,7 +115,7 @@ export class JsProgressEvent {
             return getStringFromWasm0(r0, r1);
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export(deferred1_0, deferred1_1, 1);
+            wasm.__wbindgen_export2(deferred1_0, deferred1_1, 1);
         }
     }
     /**
@@ -134,6 +134,82 @@ export class JsProgressEvent {
     }
 }
 if (Symbol.dispose) JsProgressEvent.prototype[Symbol.dispose] = JsProgressEvent.prototype.free;
+
+/**
+ * タイル情報(詳細設計書 3 章 TileFeature の JS 輸出)
+ */
+export class JsTileInfo {
+    static __wrap(ptr) {
+        const obj = Object.create(JsTileInfo.prototype);
+        obj.__wbg_ptr = ptr;
+        JsTileInfoFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        JsTileInfoFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_jstileinfo_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get detail() {
+        const ret = wasm.jstileinfo_detail(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * アプリ側が採番したタイル ID(JS では bigint として扱う)
+     * @returns {bigint}
+     */
+    get id() {
+        const ret = wasm.jstileinfo_id(this.__wbg_ptr);
+        return BigInt.asUintN(64, ret);
+    }
+    /**
+     * CIELAB 平均 (L*, a*, b*)
+     * @returns {Float32Array}
+     */
+    get mean_lab() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.jstileinfo_mean_lab(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayF32FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export2(r0, r1 * 4, 4);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * @returns {number}
+     */
+    get thumb_h() {
+        const ret = wasm.jstileinfo_thumb_h(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get thumb_w() {
+        const ret = wasm.jstileinfo_thumb_w(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get usage() {
+        const ret = wasm.jstileinfo_usage(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) JsTileInfo.prototype[Symbol.dispose] = JsTileInfo.prototype.free;
 
 /**
  * 進捗デモ用のスロットル判定(ダミー処理を 16ms 間隔のバッチに区切って進める)。
@@ -191,10 +267,51 @@ export function add(a, b) {
 }
 
 /**
+ * P2 タイル解析: タイル 1 枚を解析してタイルプールへ登録する。
+ *
+ * - `id`: アプリ側が採番したタイル ID(既存と重複する場合は置き換える)
+ * - `feature_rgba`: 特徴量用サムネイル(32×32 固定。ホスト側でボックスフィルタ縮小済み)
+ * - `compose_rgba`: 合成用サムネイル(長辺 64 上限、アスペクト維持。P4 合成用に保持)
+ * - メモリガード超過時はエラーになり、プールは変更されない
+ * @param {bigint} id
+ * @param {Uint8Array} feature_rgba
+ * @param {Uint8Array} compose_rgba
+ * @param {number} compose_w
+ * @param {number} compose_h
+ * @returns {JsTileInfo}
+ */
+export function add_tile(id, feature_rgba, compose_rgba, compose_w, compose_h) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(feature_rgba, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(compose_rgba, wasm.__wbindgen_export);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.add_tile(retptr, id, ptr0, len0, ptr1, len1, compose_w, compose_h);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return JsTileInfo.__wrap(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * メイン画像の状態を破棄する(リセット操作に対応。大容量バッファを開放する)
  */
 export function clear_main_image() {
     wasm.clear_main_image();
+}
+
+/**
+ * タイルプールを空にする(リセット操作に対応。合成用サムネイルを解放する)
+ */
+export function clear_tiles() {
+    wasm.clear_tiles();
 }
 
 /**
@@ -214,7 +331,7 @@ export function export_main_image() {
             throw takeObject(r2);
         }
         var v1 = getArrayU8FromWasm0(r0, r1).slice();
-        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        wasm.__wbindgen_export2(r0, r1 * 1, 1);
         return v1;
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
@@ -241,11 +358,29 @@ export function get_block_mean_colors() {
             throw takeObject(r2);
         }
         var v1 = getArrayU8FromWasm0(r0, r1).slice();
-        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        wasm.__wbindgen_export2(r0, r1 * 1, 1);
         return v1;
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
+}
+
+/**
+ * 登録済みタイル数(進捗の分母・UI の枚数表示に使用)
+ * @returns {number}
+ */
+export function get_tile_count() {
+    const ret = wasm.get_tile_count();
+    return ret >>> 0;
+}
+
+/**
+ * 合成用サムネイルの合計バイト数(メモリガードの監視値。wasm32 では 4 GB 未満)
+ * @returns {number}
+ */
+export function get_tiles_memory_bytes() {
+    const ret = wasm.get_tiles_memory_bytes();
+    return ret >>> 0;
 }
 
 /**
@@ -265,7 +400,25 @@ export function get_version() {
         return getStringFromWasm0(r0, r1);
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export(deferred1_0, deferred1_1, 1);
+        wasm.__wbindgen_export2(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * プールからタイルを削除する(M3 ではマッチ結果が存在しないため再マッチ対象なし)
+ * @param {bigint} id
+ */
+export function remove_tile(id) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.remove_tile(retptr, id);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        if (r1) {
+            throw takeObject(r0);
+        }
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
     }
 }
 
@@ -303,7 +456,7 @@ export function set_block_size(px) {
 export function set_main_image(rgba, width, height) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passArray8ToWasm0(rgba, wasm.__wbindgen_export2);
+        const ptr0 = passArray8ToWasm0(rgba, wasm.__wbindgen_export);
         const len0 = WASM_VECTOR_LEN;
         wasm.set_main_image(retptr, ptr0, len0, width, height);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
@@ -340,6 +493,9 @@ const JsGridInfoFinalization = (typeof FinalizationRegistry === 'undefined')
 const JsProgressEventFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_jsprogressevent_free(ptr, 1));
+const JsTileInfoFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_jstileinfo_free(ptr, 1));
 const ProgressDemoFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_progressdemo_free(ptr, 1));
@@ -359,6 +515,11 @@ function dropObject(idx) {
     heap_next = idx;
 }
 
+function getArrayF32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
@@ -370,6 +531,14 @@ function getDataViewMemory0() {
         cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
     }
     return cachedDataViewMemory0;
+}
+
+let cachedFloat32ArrayMemory0 = null;
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -426,6 +595,7 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedDataViewMemory0 = null;
+    cachedFloat32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     return wasm;
 }

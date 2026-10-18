@@ -12,6 +12,8 @@ export const messages = {
   mainDropHint: 'クリックまたはここにドロップ(メイン画像を 1 枚)',
   tileHeading: '構成画像(タイル)',
   tileDropHint: '追加した画像がここにドロップできます(複数可)',
+  tilesReadyHint: 'メイン画像を選択してください',
+  tileRemoveLabel: (id: bigint): string => `この構成画像を削除(ID: ${id.toString()})`,
 
   // S2 編集画面
   editTitle: 'フォトモザイク編集',
@@ -20,6 +22,11 @@ export const messages = {
   blockSizeLabel: 'ブロックサイズ',
   blockSizeUnit: 'px',
   tileSummary: (count: number): string => `構成画像: ${count} 枚`,
+  tileAdd: '+ 追加',
+  tileMemoryLabel: (bytes: number): string => {
+    const mib = bytes / (1024 * 1024);
+    return `タイル解析結果のメモリ: ${mib >= 10 ? Math.round(mib) : mib.toFixed(1)} MB`;
+  },
   previewAriaLabel: 'フォトモザイクのプレビュー',
 
   // 進捗表示領域
@@ -43,6 +50,10 @@ export const messages = {
   errorInvalidFile: '対応していないファイル形式です(画像ファイルを指定してください)',
   errorLoadFailed: '画像の読み込みに失敗しました',
   errorStartup: 'アプリケーションの起動に失敗しました(詳細は開発者コンソールを参照)',
+  tilesPartiallyAdded: (added: number, rejected: number): string =>
+    `${added} 枚を追加しました(${rejected} 枚は読み込めずスキップしました)`,
+  errorMemoryGuard:
+    '構成画像の合計サイズが上限に達したため、追加を停止しました(不要なタイルを削除してください)',
 } as const;
 
 /**

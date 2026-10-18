@@ -7,6 +7,7 @@
 pub mod color;
 pub mod grid;
 pub mod progress;
+pub mod tile;
 
 /// コアのバージョン文字列。UI がコアと UI の不整合を検知するために表示する
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");

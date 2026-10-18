@@ -49,9 +49,27 @@ export interface ProgressEvent {
 export type ProgressCallback = (event: ProgressEvent) => void;
 
 /**
+ * タイル情報(詳細設計書 3 章 TileFeature)。
+ * id はコア API の u64 に対応するため bigint を用いる。
+ */
+export interface TileInfo {
+  /** アプリ側が採番したタイル ID */
+  id: bigint;
+  /** 合成用サムネイル寸法(P4 合成でブロック矩形へスケーリングする際の元) */
+  thumbWidth: number;
+  thumbHeight: number;
+  /** CIELAB 平均 (L*, a*, b*) */
+  meanLab: [number, number, number];
+  /** タイル内 L*(明度)の標準偏差(0..128) */
+  detail: number;
+  /** 現在の使用回数(P3 の使用ペナルティ用) */
+  usage: number;
+}
+
+/**
  * コアの論理 API。
  * M2 で setMainImage / getBlockMeanColors の実処理(P1)を WASM で行う。
- * タイル系(addTile/removeTile)は M3 で追加する。
+ * M3 でタイル系(addTile/removeTile/clearTiles)を追加した(P2)。
  */
 export interface CoreBridge {
   /** コアのバージョン文字列。UI とコアの不整合検知に使用する */
@@ -66,6 +84,21 @@ export interface CoreBridge {
    * メイン画像未設定時は空の配列を返す。
    */
   getBlockMeanColors(): Uint8Array;
+  /**
+   * タイル 1 枚を解析してプールへ登録する(P2)。
+   * feature は特徴量用サムネイル(32×32、ボックスフィルタ縮小済み)、
+   * compose は合成用サムネイル(長辺 64 上限)。id 重複時は置き換える。
+   * メモリガード超過時は例外を投げる(プールは変更されない)。
+   */
+  addTile(id: bigint, feature: RgbaImage, compose: RgbaImage): Promise<TileInfo>;
+  /** プールからタイルを削除する(存在しない id は例外) */
+  removeTile(id: bigint): Promise<void>;
+  /** タイルプールを空にする(リセット。コア内の合成用サムネイルを解放) */
+  clearTiles(): void;
+  /** 登録済みタイル数 */
+  getTileCount(): number;
+  /** 合成用サムネイルの合計バイト数(メモリガードの監視値) */
+  getTilesMemoryBytes(): number;
   /** メイン画像の状態を破棄する(リセット。コア内の大容量バッファを開放) */
   clearMainImage(): void;
   /** 完成画像(または現時点までの合成結果)の RGBA を取得する(P5 のエンコード前段) */
