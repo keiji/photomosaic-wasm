@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>フォトモザイク メーカー</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="app-header">
+        <h1 id="app-title"></h1>
+        <span id="offline-badge" class="badge"></span>
+      </header>
+
+      <main>
+        <!-- S1 開始画面 -->
+        <section id="screen-start" aria-labelledby="start-heading">
+          <h2 id="start-heading" class="visually-hidden">開始画面</h2>
+
+          <!-- ① メイン画像 -->
+          <div
+            id="main-drop-zone"
+            class="drop-zone"
+            role="button"
+            tabindex="0"
+            aria-describedby="privacy-notice"
+          >
+            <p id="main-drop-hint" class="drop-zone-hint"></p>
+          </div>
+          <input type="file" id="main-file-input" accept="image/*" hidden />
+
+          <!-- ② 構成画像(タイル): M0 では骨格のみ。受付はタイル取り込みのマイルストーンで結線する -->
+          <div id="tile-section">
+            <h3 id="tile-heading"></h3>
+            <div id="tile-drop-zone" class="drop-zone drop-zone-soft" aria-disabled="true">
+              <p id="tile-drop-hint" class="drop-zone-hint"></p>
+            </div>
+          </div>
+
+          <p id="error-notice" class="error-notice" role="alert" hidden></p>
+
+          <p id="privacy-notice" class="privacy-notice"></p>
+        </section>
+
+        <!-- S2 編集画面 -->
+        <section id="screen-edit" aria-labelledby="edit-heading" hidden>
+          <div class="edit-toolbar">
+            <button type="button" id="back-button" class="button"></button>
+            <h2 id="edit-heading" class="edit-title"></h2>
+            <button type="button" id="save-button" class="button button-primary" disabled></button>
+          </div>
+
+          <!-- プレビューキャンバス(メイン画像 → フォトモザイク) -->
+          <div id="preview-frame">
+            <canvas id="preview-canvas" role="img"></canvas>
+          </div>
+
+          <!-- ブロックサイズ -->
+          <div id="block-size-section" class="control-row">
+            <label for="block-size-slider" id="block-size-label"></label>
+            <input type="range" id="block-size-slider" min="8" max="128" step="1" value="24" />
+            <output id="block-size-value" for="block-size-slider"></output>
+          </div>
+
+          <!-- 進捗表示領域(S3)。開閉可。既定: 表示 -->
+          <div id="progress-section">
+            <div class="progress-header">
+              <span id="progress-title"></span>
+              <button
+                type="button"
+                id="progress-toggle"
+                class="button button-small"
+                aria-expanded="true"
+                aria-controls="progress-body"
+              ></button>
+            </div>
+            <div id="progress-body">
+              <div
+                id="progress-bar"
+                role="progressbar"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow="0"
+              >
+                <div id="progress-bar-fill"></div>
+              </div>
+              <span id="progress-label"></span>
+              <span id="phase-label"></span>
+            </div>
+          </div>
+
+          <!-- 構成画像一覧(骨格): M0 では枚数表示のみ -->
+          <div id="tile-summary" class="control-row"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
