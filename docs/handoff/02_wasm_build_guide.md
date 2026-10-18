@@ -186,6 +186,7 @@ tinygo build -o web/app.wasm -target wasm ./cmd/core
 | 決定性 | 浮動小数演算の結果を Web/Android で一致させるため、計算順序をコア内で固定する(f32 と f64 を混ぜない等) |
 | CI | Rust: `cargo fmt` / `cargo clippy` / `cargo test` / `wasm-pack build` を必須チェックにする |
 | サイズ監視 | CI でバイナリサイズの上限チェック(例: 1 MB 超えたら失敗)を行い、肥大化を早期に検知する |
+| ライセンス | 本プロジェクトは MIT ライセンスで公開する。リリース物には依存 crate・ライブラリのライセンス表記(NOTICES)を同梱する(cargo-deny 等で生成し、CI で検査する) |
 
 ## 5. 検収基準(本手順の完了定義)
 

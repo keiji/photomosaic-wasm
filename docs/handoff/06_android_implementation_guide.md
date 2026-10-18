@@ -75,7 +75,7 @@ Kotlin(受信コールバック → callbackFlow → StateFlow → Compose)
 | 種別 | 方向 | ペイロード(JSON) |
 |---|---|---|
 | control | Kotlin → JS | `{type: "setMainImage" \| "addTile" \| "removeTile" \| "run" \| "cancel", dataRef: "...", meta: {...}}` |
-| progress | JS → Kotlin | `{type: "progress", phase, phaseRatio, overallRatio, assignedBlocks, totalBlocks, message}` |
+| progress | JS → Kotlin | `{type: "progress", phase, phaseRatio, overallRatio, assignedBlocks, totalBlocks, code, params}` |
 | batchDone | JS → Kotlin | `{type: "batchDone", rows: [begin, end], dataRef: "..."}`(該当範囲の合成済み RGBA) |
 | result | JS → Kotlin | `{type: "result", dataRef: "..."}`(完成画像 RGBA) |
 | error | JS → Kotlin | `{type: "error", code, message}` |
@@ -104,7 +104,7 @@ Kotlin(受信コールバック → callbackFlow → StateFlow → Compose)
 
 ### 5.2 デコード(Kotlin 側)
 
-- `ImageDecoder`(API 28 以降)または `BitmapFactory` で EXIF 回転を反映してデコードし、`ARGB_8888`(RGBA)へ正規化する。
+- `ImageDecoder`(API 28 以降)または `BitmapFactory` で EXIF 回転を反映してデコードし、`ARGB_8888`(RGBA)へ正規化する(HEIC を含む、端末が対応する形式を扱う)。
 - 長辺 4096px 超(解析用)は Kotlin 側で縮小して正規化(Web の `imageLoader.ts` と同じ仕様)。
 - RGBA を named data でサンドボックスへ提供する。
 
@@ -140,7 +140,8 @@ progress.collectAsState().value.let { event ->
 |---|---|
 | 完全オフライン | マニフェストに `INTERNET` が無いこと + 機内モードで全機能動作 |
 | サンドボックス対応 | 非対応端末での案内表示。`isSupported()` / `typeof WebAssembly` の検査が機能すること |
-| 結果の決定性 | 同一ホスト内で同一入力 → 同一出力(ハッシュ比較)。Web と Android の間は、コア出力が同一であること(Kotlin 側縮小エンジンの差は視覚一致で許容) |
+| 結果の決定性 | 同一ホスト内で同一入力 → 同一出力(ハッシュ比較)。Web と Android の間は同一入力ピクセルに対するコア出力の決定性のみ検証し、入力のデコード差に起因する出力差は視覚一致で評価する |
+| メタデータ不在 | GPS 付き EXIF の入力で生成した出力 PNG に EXIF が含まれないこと(`ExifInterface` で主要タグが空であることを確認) |
 | 性能 | メトリクス JSON を実機で取得し、[性能計測設計](./05_performance_measurement.md) の目標と比較(JIT ウォームアップを考慮しベンチは 2 回実行) |
 | 転送 | named data / MessagePort の転送時間を計測し、体感を損ねないことを確認 |
 | メモリ | isolate のメモリ上限(端末依存)内で S-large が動作すること。超過時はエラーで安全に止まること |
