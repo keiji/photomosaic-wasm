@@ -26,6 +26,7 @@ export const messages = {
   progressTitle: '進捗表示',
   progressHide: '非表示 ▲',
   progressShow: '表示 ▼',
+  progressDemo: '進捗デモ(WASM)',
   progressBlocksLabel: (assigned: number, total: number, percent: number): string =>
     `${assigned.toLocaleString('ja-JP')} / ${total.toLocaleString('ja-JP')} ブロック (${percent}%)`,
 
@@ -43,3 +44,22 @@ export const messages = {
   errorLoadFailed: '画像の読み込みに失敗しました',
   errorStartup: 'アプリケーションの起動に失敗しました(詳細は開発者コンソールを参照)',
 } as const;
+
+/**
+ * コアのフェーズ識別子(詳細設計書 7.2 の code)を UI 文言へ変換する。
+ * 文言はコアが持たず、この対応表のみが UI 側の情報源になる。
+ */
+export function phaseLabelFor(code: string): string {
+  switch (code) {
+    case 'main_analyze':
+      return messages.phaseMainAnalyze;
+    case 'tile_analyze':
+      return messages.phaseTileAnalyze;
+    case 'match':
+      return messages.phaseMatch;
+    case 'compose':
+      return messages.phaseCompose;
+    default:
+      return messages.phaseIdle;
+  }
+}

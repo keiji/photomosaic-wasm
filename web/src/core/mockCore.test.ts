@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { computeGrid, createMockCore, DEFAULT_BLOCK_SIZE } from './mockCore';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  computeGrid,
+  createMockCore,
+  DEFAULT_BLOCK_SIZE,
+  PROGRESS_DEMO_TOTAL_BLOCKS,
+} from './mockCore';
+import type { ProgressEvent } from './types';
 
 describe('computeGrid(グリッド計算: 詳細設計書 4.2)', () => {
   it('割り切れるサイズでは半端ブロックなし', () => {
@@ -89,5 +95,58 @@ describe('createMockCore(論理 API)', () => {
     expect(exported.width).toBe(2);
     expect(exported.height).toBe(2);
     expect(Array.from(exported.data)).toEqual(Array.from(image.data));
+  });
+});
+
+describe('進捗デモ(進捗コールバック経路: handoff/04 M1)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('ダミー処理 1 秒を 16ms 間隔で発火し、全ブロック確定で完了する', async () => {
+    // performance.now も fake 化して runProgressDemo 内の経過時間計算を制御する
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'],
+    });
+    const core = createMockCore();
+    const events: ProgressEvent[] = [];
+    core.onProgress((event) => events.push(event));
+
+    const done = core.runProgressDemo(1000);
+    await vi.advanceTimersByTimeAsync(1100);
+    await done;
+
+    expect(events.length).toBeGreaterThanOrEqual(50); // 1000ms / 16ms ≈ 62 発火
+    const first = events[0];
+    const last = events.at(-1);
+    expect(first).toBeDefined();
+    expect(last).toBeDefined();
+    if (!first || !last) return;
+    expect(first.phaseCode).toBe('match');
+    expect(first.assignedBlocks).toBe(0);
+    expect(last.phaseCode).toBe('match');
+    expect(last.assignedBlocks).toBe(PROGRESS_DEMO_TOTAL_BLOCKS);
+    expect(last.totalBlocks).toBe(PROGRESS_DEMO_TOTAL_BLOCKS);
+    // フェーズ内進捗は単調増加する
+    for (let i = 1; i < events.length; i++) {
+      const prev = events[i - 1];
+      const current = events[i];
+      if (!prev || !current) continue;
+      expect(current.phaseRatio).toBeGreaterThanOrEqual(prev.phaseRatio);
+    }
+  });
+
+  it('onProgress に登録したコールバックへ進捗が届く', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'],
+    });
+    const core = createMockCore();
+    let received = 0;
+    core.onProgress(() => received++);
+
+    const done = core.runProgressDemo(320); // 16ms × 20 バッチ
+    await vi.advanceTimersByTimeAsync(500);
+    await done;
+    expect(received).toBeGreaterThanOrEqual(15);
   });
 });

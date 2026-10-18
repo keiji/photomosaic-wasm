@@ -1,0 +1,12 @@
+[package]
+name = "photomosaic-core"
+version = "0.1.0"
+edition = "2021"
+description = "Photomosaic core logic (platform-independent, WASM-compiled)"
+license = "MIT"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# M1 骨格では外部依存なし(算術のみ)。色変換・k-d 木は後続マイルストーンで追加

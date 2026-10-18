@@ -1,3 +1,5 @@
 node_modules
 dist
 coverage
+# wasm-pack 生成物(npm run wasm:build で再生成)
+src/wasm

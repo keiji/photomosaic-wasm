@@ -1,0 +1,25 @@
+[package]
+name = "photomosaic-core-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "wasm-bindgen bindings for the photomosaic core (single .wasm for Web and Android)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+photomosaic-core = { path = "../core" }
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = "z" # サイズ重視(詳細設計書: 500KB 以内の基準値作り)
+lto = true
+codegen-units = 1
+panic = "abort" # unwind コードを削る
+strip = true
+
+[package.metadata.wasm-pack.profile.release]
+# 環境の binaryen が使えないため rustc 側の最適化(opt-level=z + LTO)のみで基準値を作る。
+# wasm-opt 導入時に再計測して記録を更新する(handoff/02 5 章: 追加で 1〜2 割減が見込める)
+wasm-opt = false

@@ -31,12 +31,31 @@ npm install
 npm run dev
 ```
 
-ブラウザで表示される URL を開く。初回アクセス後に以下が動作する(M0 時点。処理はモックコア):
+ブラウザで表示される URL を開く。初回アクセス後に以下が動作する:
 
 1. S1(開始画面)でメイン画像をクリック/ドロップで設定
 2. S2(編集画面)でグリッド線 + ブロック平均色のプレビューを表示
 3. ブロックサイズスライダー(8〜128 px)でグリッドを再計算(300ms デバウンス)
-4. 保存で PNG ダウンロード、リセット/戻るで S1 へ戻る
+4. 進捗表示領域の「進捗デモ(WASM)」で、WASM コア経由の進捗コールバック(16ms 間隔・ダミー処理 1 秒)を確認
+5. 保存で PNG ダウンロード、リセット/戻るで S1 へ戻る
+
+メイン画像のグリッド計算はモック(M2 でコアへ移行)。WASM のロードに失敗した環境ではモックへフォールバックする。
+
+### コア(WASM)のビルド
+
+Rust ツールチェーン(rustup + `wasm32-unknown-unknown` ターゲット + wasm-pack)が必要。
+
+```bash
+cd web
+npm run wasm:build   # wasm-pack build core-wasm --release --target web → src/wasm/ へ出力
+```
+
+生成物(`web/src/wasm/`)は git 管理外。コア側の検査:
+
+```bash
+cd core
+cargo fmt && cargo clippy -- -D warnings && cargo test
+```
 
 ### 検査・テスト
 
@@ -44,9 +63,11 @@ npm run dev
 npm run typecheck   # tsc --noEmit
 npm run lint        # ESLint
 npm run format      # Prettier 適用
-npm test            # Vitest(単体テスト)
+npm test            # Vitest(単体テスト。WASM 生成物があれば結合テストも実行)
 npm run build       # 型チェック + 本番ビルド(dist/ へ出力)
 ```
+
+CI(.github/workflows/ci.yml)はプッシュ毎に cargo fmt/clippy/test + wasm-pack build + バイナリサイズチェック(≤ 500 KB)+ Web 側の全検査を実行する。
 
 ## ライセンス
 

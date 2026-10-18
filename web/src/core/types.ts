@@ -30,10 +30,28 @@ export interface GridInfo {
 }
 
 /**
+ * 進捗イベント(詳細設計書 3 章 ProgressEvent)。
+ * コアは文言を持たず、`phaseCode` は UI 側リソースで文言化する安定識別子のみ。
+ */
+export interface ProgressEvent {
+  /** フェーズの安定識別子(例: "main_analyze" | "tile_analyze" | "match" | "compose") */
+  phaseCode: string;
+  /** 0.0..1.0(フェーズ内の進捗) */
+  phaseRatio: number;
+  /** 0.0..1.0(全フェーズ通し) */
+  overallRatio: number;
+  /** マッチ済みブロック数(match 中のみ有効) */
+  assignedBlocks: number;
+  totalBlocks: number;
+}
+
+/** 進捗イベントのコールバック(onProgress で登録する) */
+export type ProgressCallback = (event: ProgressEvent) => void;
+
+/**
  * コアの論理 API。
- * M0 で使用するのはメイン画像の設定・ブロックサイズ変更・エクスポートのみ。
- * タイル系(addTile/removeTile)と進捗系(onProgress/onResult/run/cancel)は
- * M3/M5 のマイルストーンでインターフェースに追加する。
+ * M1 ではメイン画像系はモック計算(グリッドのみ)で、WASM は getVersion・
+ * 進捗デモの経路を本物にする。タイル系(addTile/removeTile)は M3 で追加する。
  */
 export interface CoreBridge {
   /** コアのバージョン文字列。UI とコアの不整合検知に使用する */
@@ -44,4 +62,12 @@ export interface CoreBridge {
   setBlockSize(px: number): Promise<GridInfo>;
   /** 完成画像(または現時点までの合成結果)の RGBA を取得する(P5 のエンコード前段) */
   exportImage(): Promise<RgbaImage>;
+  /** 進捗イベント受け取り登録(M5 でコア駆動の発火に置き換わる) */
+  onProgress(callback: ProgressCallback): void;
+  /**
+   * 進捗デモ(M1 検証用): ダミー処理を 16ms 間隔のバッチに区切り、
+   * コアのスロットル規則(16ms / 1%)に従って進捗イベントを発火する。
+   * M5 で実物の進捗(onResult / cancel 付き)に置き換わる。
+   */
+  runProgressDemo(durationMs?: number): Promise<void>;
 }

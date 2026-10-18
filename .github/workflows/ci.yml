@@ -1,0 +1,101 @@
+# CI 最小構成(handoff/04 2 章):
+# 静的検査 + wasm-pack build + 単体テスト(プッシュ毎)+ バイナリサイズチェック
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust (core / core-wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: v0.13.1
+
+      - name: cargo fmt --check
+        run: |
+          cargo fmt --check --manifest-path core/Cargo.toml
+          cargo fmt --check --manifest-path core-wasm/Cargo.toml
+
+      - name: cargo clippy
+        run: |
+          cargo clippy --manifest-path core/Cargo.toml -- -D warnings
+          cargo clippy --manifest-path core-wasm/Cargo.toml -- -D warnings
+
+      - name: cargo test (core)
+        run: cargo test --manifest-path core/Cargo.toml
+
+      - name: wasm-pack build
+        run: wasm-pack build core-wasm --release --target web --out-dir ../web/src/wasm
+
+      - name: Check binary size (<= 500 KB, handoff/02 検収基準)
+        run: |
+          SIZE=$(stat -c%s web/src/wasm/photomosaic_core_wasm_bg.wasm)
+          echo "photomosaic_core_wasm_bg.wasm: ${SIZE} bytes"
+          test "$SIZE" -le 512000
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-pkg
+          path: web/src/wasm
+          retention-days: 7
+
+  web:
+    name: Web (TypeScript)
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifact (wasm-pack build 成果物)
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-pkg
+          path: web/src/wasm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        working-directory: web
+        run: npm ci
+
+      - name: tsc --noEmit
+        working-directory: web
+        run: npm run typecheck
+
+      - name: ESLint
+        working-directory: web
+        run: npm run lint
+
+      - name: Prettier
+        working-directory: web
+        run: npm run format:check
+
+      - name: Vitest(WASM 生成物を使う結合テストを含む)
+        working-directory: web
+        run: npm test
+
+      - name: vite build
+        working-directory: web
+        run: npm run build

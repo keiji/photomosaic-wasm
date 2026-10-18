@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "wasm:build": "wasm-pack build ../core-wasm --release --target web --out-dir ../web/src/wasm",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -16,6 +17,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.30.0",
+    "@types/node": "^26.6.5",
     "eslint": "^9.30.0",
     "eslint-config-prettier": "^10.1.5",
     "prettier": "^3.6.0",

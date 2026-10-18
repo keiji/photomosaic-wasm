@@ -12,7 +12,7 @@ import { buildDownloadFilename, downloadBlob, encodePng } from './io/exporter';
 import { createCoreBridge, getCoreImplementation } from './core/bridge';
 import { AppStore } from './state/store';
 import type { AppStoreData } from './state/store';
-import { messages } from './i18n/messages';
+import { messages, phaseLabelFor } from './i18n/messages';
 import { setupFileZone } from './ui/dropZone';
 import { Preview } from './ui/preview';
 import { ProgressPanel } from './ui/progress';
@@ -60,6 +60,29 @@ async function main(): Promise<void> {
   const preview = new Preview(requireElement<HTMLCanvasElement>('#preview-canvas'));
   const progress = new ProgressPanel(requireElement<HTMLElement>('#progress-section'));
   const controls = new Controls(screenEdit);
+
+  // --- 進捗イベントの受信(WASM 経由。bridge が登録したコールバックへ届く) ---
+  core.onProgress((event) => {
+    progress.setCounts(event.assignedBlocks, event.totalBlocks);
+    progress.setPhase(phaseLabelFor(event.phaseCode));
+  });
+
+  // --- 進捗デモ(M1 検証用): ダミー処理 1 秒を 16ms 間隔のバッチで進める ---
+  const demoButton = requireElement<HTMLButtonElement>('#progress-demo');
+  demoButton.textContent = messages.progressDemo;
+  demoButton.addEventListener('click', async () => {
+    if (demoButton.disabled) return;
+    demoButton.disabled = true;
+    progress.setPhase(phaseLabelFor('match'));
+    try {
+      await core.runProgressDemo(1000);
+    } catch (err) {
+      console.error('progress demo failed', err);
+      progress.reset();
+    } finally {
+      demoButton.disabled = false;
+    }
+  });
 
   let mainImage: LoadedImage | null = null;
 
