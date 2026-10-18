@@ -45,7 +45,21 @@ npm run dev
 
 wasm-pack 生成物(`web/src/wasm/`)はリポジトリに同梱しているため、**clone 後に Rust 環境がなくても dev/build が動作する**。
 
-コアを変更した場合は Rust ツールチェーン(rustup + `wasm32-unknown-unknown` ターゲット + wasm-pack)で生成物を更新する:
+コアを変更した場合は生成物を更新する。初回のみ、Rust ツールチェーンを導入する([handoff/02](./docs/handoff/02_wasm_build_guide.md) の 2.1 節と同じ手順):
+
+```bash
+# 1. Rust 本体(rustup)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# 2. WASM ターゲット
+rustup target add wasm32-unknown-unknown
+
+# 3. wasm-pack(バインディング生成・パッケージ化の標準ツール)
+curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+```
+
+生成物の更新:
 
 ```bash
 cd web
