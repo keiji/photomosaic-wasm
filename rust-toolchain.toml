@@ -1,0 +1,7 @@
+# WASM 生成物を git に同梱しているため、ツールチェーンを固定する。
+# CI も本ファイルのバージョンでビルドし、コミット済み生成物との差分検証(バイト一致)を成立させる。
+# 更新手順: channel を上げて全検査 → cd web && npm run wasm:build → 生成物をコミット
+[toolchain]
+channel = "1.99.1"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustfmt", "clippy"]

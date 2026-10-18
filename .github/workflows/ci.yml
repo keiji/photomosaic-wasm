@@ -15,8 +15,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # rust-toolchain.toml で固定したバージョンを使う(生成物のバイト一致のため)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99.1"
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
 
@@ -42,7 +44,10 @@ jobs:
         run: cargo test --manifest-path core/Cargo.toml
 
       - name: wasm-pack build
-        run: wasm-pack build core-wasm --release --target web --out-dir ../web/src/wasm
+        # RUSTFLAGS でパスを remap する(生成物をバイト一致させる)ため、
+        # npm script 経由で実行する
+        working-directory: web
+        run: npm run wasm:build
 
       - name: Verify committed artifacts match the build
         run: |

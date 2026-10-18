@@ -9,7 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "wasm:build": "wasm-pack build ../core-wasm --release --target web --out-dir ../web/src/wasm",
+    "wasm:build": "RUSTFLAGS=\"--remap-path-prefix=$(cd .. && pwd)=/ --remap-path-prefix=$HOME/.cargo=/cargo-home\" wasm-pack build ../core-wasm --release --target web --out-dir ../web/src/wasm",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
