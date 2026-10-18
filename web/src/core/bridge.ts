@@ -7,7 +7,14 @@
  * - コアの状態(メイン画像・ブロック特徴量)は WASM 内に保持される
  */
 import { createMockCore } from './mockCore';
-import type { CoreBridge, GridInfo, ProgressCallback, ProgressEvent, TileInfo } from './types';
+import type {
+  CoreBridge,
+  GridInfo,
+  MosaicConfig,
+  ProgressCallback,
+  ProgressEvent,
+  TileInfo,
+} from './types';
 
 /** コア実装の種類(デバッグ表示用) */
 export type CoreImplementation = 'mock' | 'wasm';
@@ -140,8 +147,22 @@ async function createWasmCore(): Promise<CoreBridge> {
       lastGrid = null;
     },
 
+    async run(): Promise<void> {
+      // マッチング(P3)+ 合成(P4)をコア内で一括実行する(M4)。
+      // 段階的進捗・部分描画は M5 で導入する
+      wasm.run();
+    },
+
+    async getConfig(): Promise<MosaicConfig> {
+      return JSON.parse(wasm.get_config());
+    },
+
+    async setConfig(config: MosaicConfig): Promise<void> {
+      wasm.set_config(JSON.stringify(config));
+    },
+
     async exportImage(): Promise<import('./types').RgbaImage> {
-      // メイン画像はコア内に保持されている(M4 で合成結果の返却に差し替わる)
+      // run 済みならコアが P4 合成結果を、未実行ならメイン画像を返す
       if (!lastGrid) {
         throw new Error('main image is not set');
       }

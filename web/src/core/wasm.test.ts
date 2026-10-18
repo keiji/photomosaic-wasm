@@ -251,4 +251,125 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       expect(perTileMs).toBeLessThan(5);
     });
   });
+
+  describe('一括生成(M4: P3 マッチング + P4 合成)', () => {
+    const featureThumb = (r: number, g: number, b: number): Uint8Array => {
+      const data = new Uint8Array(32 * 32 * 4);
+      for (let offset = 0; offset < data.length; offset += 4) {
+        data[offset] = r;
+        data[offset + 1] = g;
+        data[offset + 2] = b;
+        data[offset + 3] = 255;
+      }
+      return data;
+    };
+    const composeThumb = (w: number, h: number, rgb: [number, number, number]): Uint8Array => {
+      const data = new Uint8Array(w * h * 4);
+      for (let offset = 0; offset < data.length; offset += 4) {
+        data[offset] = rgb[0];
+        data[offset + 1] = rgb[1];
+        data[offset + 2] = rgb[2];
+        data[offset + 3] = 255;
+      }
+      return data;
+    };
+
+    afterEach(() => {
+      wasm.clear_tiles();
+      wasm.clear_main_image();
+    });
+
+    it('getConfig/setConfig が往復し、範囲外はエラーになる', () => {
+      const config = JSON.parse(wasm.get_config()) as Record<string, number>;
+      // f32 経由の丸め(0.7 → 0.6999999...)を許容して既定値を検証する
+      const expected: Record<string, number> = {
+        w_c: 1.0,
+        w_d: 0.25,
+        usage_penalty: 0.35,
+        neighbor_penalty: 0.5,
+        identical_de: 2.0,
+        usage_cap: 4,
+        color_correct: 0.7,
+        row_batch: 8,
+      };
+      for (const [key, value] of Object.entries(expected)) {
+        expect(config[key]).toBeCloseTo(value, 5);
+      }
+
+      wasm.set_config(JSON.stringify({ ...config, color_correct: 0.5, row_batch: 4 }));
+      const updated = JSON.parse(wasm.get_config()) as Record<string, number>;
+      expect(updated.color_correct).toBeCloseTo(0.5, 5);
+      expect(updated.row_batch).toBe(4);
+
+      // 復元: default へ戻す(後続テストは既定設定を前提とする)
+      wasm.set_config(JSON.stringify(expected));
+      const restored = JSON.parse(wasm.get_config()) as Record<string, number>;
+      expect(restored.row_batch).toBe(8);
+
+      expect(() => wasm.set_config(JSON.stringify({ ...config, color_correct: 1.5 }))).toThrow(
+        /color_correct/,
+      );
+      // 失敗した set は既存設定(既定へ復元済み)を壊さない
+      expect(JSON.parse(wasm.get_config()).color_correct).toBeCloseTo(0.7, 5);
+      // 不正 JSON もエラー
+      expect(() => wasm.set_config('{ invalid')).toThrow();
+    });
+
+    it('メイン画像とタイルからフォトモザイクを一括生成する', () => {
+      // メイン: 48x24 の左半分赤・右半分青
+      const main = new Uint8Array(48 * 24 * 4);
+      for (let y = 0; y < 24; y++) {
+        for (let x = 0; x < 48; x++) {
+          const offset = (y * 48 + x) * 4;
+          const rgb: [number, number, number] = x < 24 ? [255, 0, 0] : [0, 0, 255];
+          main[offset] = rgb[0];
+          main[offset + 1] = rgb[1];
+          main[offset + 2] = rgb[2];
+          main[offset + 3] = 255;
+        }
+      }
+      wasm.set_main_image(main, 48, 24);
+      wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 64, [255, 0, 0]), 64, 64);
+      wasm.add_tile(2n, featureThumb(0, 0, 255), composeThumb(64, 64, [0, 0, 255]), 64, 64);
+
+      wasm.run();
+
+      const exported = wasm.export_main_image();
+      expect(exported.length).toBe(48 * 24 * 4);
+      // 全ピクセル不透明(白背景仕様)
+      for (let offset = 3; offset < exported.length; offset += 4) {
+        expect(exported[offset]).toBe(255);
+      }
+      // 左ブロックは赤系・右ブロックは青系のタイルが割り当てられている
+      const red = exported[(12 * 48 + 12) * 4];
+      const blue = exported[(12 * 48 + 36) * 4];
+      expect(red).toBeGreaterThan(200);
+      expect(blue).toBeLessThan(55);
+    });
+
+    it('タイルプール空での run はエラーになる(詳細設計書 6 章)', () => {
+      const main = new Uint8Array(24 * 24 * 4);
+      wasm.set_main_image(main, 24, 24);
+      expect(() => wasm.run()).toThrow(/tile pool is empty/);
+    });
+
+    it('メイン画像未設定での run はエラーになる', () => {
+      expect(() => wasm.run()).toThrow(/main image is not set/);
+    });
+
+    it('set_block_size 後は合成結果が無効化される(メイン画像へ戻る)', () => {
+      const main = new Uint8Array(24 * 24 * 4);
+      wasm.set_main_image(main, 24, 24);
+      wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 64, [255, 0, 0]), 64, 64);
+      wasm.run();
+      const composed = wasm.export_main_image();
+      // 合成後は原画像(全 0)ではなく色補正済みのタイル描画になる
+      // (α=0.7 → 赤タイルの R 成分が残り、G/B はゼロ除算ガードで 0 のまま)
+      expect(composed.some((b) => b > 0)).toBe(true);
+
+      wasm.set_block_size(12); // composed はクリア
+      const exported = wasm.export_main_image();
+      expect(Array.from(exported)).toEqual(Array.from(main));
+    });
+  });
 });

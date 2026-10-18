@@ -101,7 +101,8 @@ export function clear_tiles(): void;
 
 /**
  * 現時点の完成画像(または解析対象のメイン画像)RGBA を返す(P5 のエンコード前段)。
- * コア内バッファを 1 回だけ取り出す設計に対応し、M4 で合成結果の返却に差し替わる。
+ * run 済みの場合は P4 合成結果を、未実行の場合は正規化後のメイン画像を返す
+ * (詳細設計書 2 章 exportImage: 「完成画像(または現時点までの合成結果)」)。
  */
 export function export_main_image(): Uint8Array;
 
@@ -113,6 +114,11 @@ export function export_main_image(): Uint8Array;
  * メイン画像未設定時は空の配列を返す(論理 API の契約)。
  */
 export function get_block_mean_colors(): Uint8Array;
+
+/**
+ * 現在の設定(詳細設計書 5 章)を JSON 文字列で返す(詳細設計書 2 章 getConfig)
+ */
+export function get_config(): string;
 
 /**
  * 登録済みタイル数(進捗の分母・UI の枚数表示に使用)
@@ -135,9 +141,25 @@ export function get_version(): string;
 export function remove_tile(id: bigint): void;
 
 /**
+ * フォトモザイクのマッチング(P3)+ 合成(P4)を一括実行する(M4)。
+ *
+ * - メイン画像未設定・タイルプール空の場合はエラー(詳細設計書 6 章:
+ *   タイルプール空での run は実行せず UI 層で案内する)
+ * - 完了後、`export_main_image` で合成結果を取得できる
+ * - 進捗イベントの発火(バッチごとの JS 制御返し)は M5 で導入する
+ */
+export function run(): void;
+
+/**
  * P1 再実行: ブロックサイズを変更してグリッド・ブロック特徴量を再計算する
  */
 export function set_block_size(px: number): JsGridInfo;
+
+/**
+ * 設定 JSON でパラメータを上書きする(詳細設計書 2 章 setConfig)。
+ * すべてのフィールドが必須。詳細設計書 5 章の範囲外はエラーになる
+ */
+export function set_config(json: string): void;
 
 /**
  * P1 メイン画像解析: グリッド計算とブロック特徴量を計算し、コア内に保持する。
@@ -161,6 +183,7 @@ export interface InitOutput {
     readonly clear_tiles: () => void;
     readonly export_main_image: (a: number) => void;
     readonly get_block_mean_colors: (a: number) => void;
+    readonly get_config: (a: number) => void;
     readonly get_tile_count: () => number;
     readonly get_tiles_memory_bytes: () => number;
     readonly get_version: (a: number) => void;
@@ -184,11 +207,15 @@ export interface InitOutput {
     readonly progressdemo_new: (a: number) => number;
     readonly progressdemo_tick: (a: number, b: number, c: number) => number;
     readonly remove_tile: (a: number, b: bigint) => void;
+    readonly run: (a: number) => void;
     readonly set_block_size: (a: number, b: number) => void;
+    readonly set_config: (a: number, b: number, c: number) => void;
     readonly set_main_image: (a: number, b: number, c: number, d: number, e: number) => void;
-    readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
     readonly __wbindgen_export: (a: number, b: number) => number;
-    readonly __wbindgen_export2: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_export3: (a: number) => void;
+    readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
+    readonly __wbindgen_export4: (a: number, b: number, c: number) => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

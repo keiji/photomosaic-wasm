@@ -71,6 +71,17 @@
             <output id="block-size-value" for="block-size-slider"></output>
           </div>
 
+          <!-- フォトモザイク一括生成(M4) -->
+          <div id="generate-section" class="control-row">
+            <button
+              type="button"
+              id="generate-button"
+              class="button button-primary"
+              disabled
+            ></button>
+            <p id="tiles-required-hint" class="tiles-hint" hidden></p>
+          </div>
+
           <!-- 進捗表示領域(S3)。開閉可。既定: 表示 -->
           <div id="progress-section">
             <div class="progress-header">
@@ -100,11 +111,21 @@
             </div>
           </div>
 
-          <!-- 構成画像一覧(S2): 枚数 + 追加 + サムネイル一覧/個別削除 -->
-          <div id="tile-edit-section" class="control-row">
-            <span id="tile-summary"></span>
-            <span id="tile-memory" class="tile-memory"></span>
-            <button type="button" id="tile-add-edit" class="button button-small"></button>
+          <!-- 構成画像(S2): メイン画像と同じドロップ領域形式で追加する -->
+          <div id="tile-edit-section">
+            <div
+              id="tile-drop-zone-edit"
+              class="drop-zone drop-zone-soft"
+              role="button"
+              tabindex="0"
+              aria-describedby="privacy-notice"
+            >
+              <p id="tile-drop-hint-edit" class="drop-zone-hint"></p>
+            </div>
+            <div class="control-row">
+              <span id="tile-summary"></span>
+              <span id="tile-memory" class="tile-memory"></span>
+            </div>
           </div>
           <div id="tile-list-edit"></div>
         </section>

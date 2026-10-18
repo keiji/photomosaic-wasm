@@ -19,8 +19,11 @@ export const messages = {
   editTitle: 'フォトモザイク編集',
   back: '← 戻る',
   save: '保存',
+  generate: 'フォトモザイクを生成',
   blockSizeLabel: 'ブロックサイズ',
   blockSizeUnit: 'px',
+  tilesRequiredHint: '構成画像を追加してください',
+  tileDropHintEdit: 'クリックまたはここにドロップ(構成画像を追加・複数可)',
   tileSummary: (count: number): string => `構成画像: ${count} 枚`,
   tileAdd: '+ 追加',
   tileMemoryLabel: (bytes: number): string => {
@@ -49,6 +52,7 @@ export const messages = {
   // エラー(インライン表示)
   errorInvalidFile: '対応していないファイル形式です(画像ファイルを指定してください)',
   errorLoadFailed: '画像の読み込みに失敗しました',
+  errorGenerate: 'フォトモザイクの生成に失敗しました',
   errorStartup: 'アプリケーションの起動に失敗しました(詳細は開発者コンソールを参照)',
   tilesPartiallyAdded: (added: number, rejected: number): string =>
     `${added} 枚を追加しました(${rejected} 枚は読み込めずスキップしました)`,

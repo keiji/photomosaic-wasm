@@ -18,6 +18,7 @@ export class Controls {
   private readonly output: HTMLOutputElement;
   private readonly saveButton: HTMLButtonElement;
   private readonly backButton: HTMLButtonElement;
+  private readonly generateButton: HTMLButtonElement;
 
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private onBlockSizeChange: (px: number) => void = () => {};
@@ -29,6 +30,7 @@ export class Controls {
     this.output = this.require<HTMLOutputElement>('#block-size-value');
     this.saveButton = this.require<HTMLButtonElement>('#save-button');
     this.backButton = this.require<HTMLButtonElement>('#back-button');
+    this.generateButton = this.require<HTMLButtonElement>('#generate-button');
 
     this.output.textContent = this.formatSize(Number(this.slider.value));
 
@@ -57,6 +59,16 @@ export class Controls {
 
   handleBack(handler: () => void): void {
     this.backButton.addEventListener('click', handler);
+  }
+
+  /** フォトモザイク一括生成(M4)の実行ハンドラを登録する */
+  handleGenerate(handler: () => void): void {
+    this.generateButton.addEventListener('click', handler);
+  }
+
+  /** 生成ボタンの有効/無効を切り替える */
+  setGenerateEnabled(enabled: boolean): void {
+    this.generateButton.disabled = !enabled;
   }
 
   /** 保存ボタンの有効/無効を切り替える(基本設計書 1.4: DONE で有効) */

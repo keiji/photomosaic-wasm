@@ -40,7 +40,9 @@ function applyMessages(): void {
   requireElement<HTMLElement>('#back-button').textContent = messages.back;
   requireElement<HTMLElement>('#save-button').textContent = messages.save;
   requireElement<HTMLElement>('#block-size-label').textContent = messages.blockSizeLabel;
-  requireElement<HTMLButtonElement>('#tile-add-edit').textContent = messages.tileAdd;
+  requireElement<HTMLElement>('#tile-drop-hint-edit').textContent = messages.tileDropHintEdit;
+  requireElement<HTMLButtonElement>('#generate-button').textContent = messages.generate;
+  requireElement<HTMLElement>('#tiles-required-hint').textContent = messages.tilesRequiredHint;
   requireElement<HTMLCanvasElement>('#preview-canvas').setAttribute(
     'aria-label',
     messages.previewAriaLabel,
@@ -62,6 +64,7 @@ async function main(): Promise<void> {
   const tileSummary = requireElement<HTMLElement>('#tile-summary');
   const tileMemory = requireElement<HTMLElement>('#tile-memory');
   const tilesReadyHint = requireElement<HTMLElement>('#tiles-ready-hint');
+  const tilesRequiredHint = requireElement<HTMLElement>('#tiles-required-hint');
   const tileListStartContainer = requireElement<HTMLElement>('#tile-list-start');
   const tileListEditContainer = requireElement<HTMLElement>('#tile-list-edit');
 
@@ -109,10 +112,16 @@ async function main(): Promise<void> {
     screenStart.hidden = inEdit;
     screenEdit.hidden = !inEdit;
 
-    // 保存ボタン: 本仕様では DONE で有効(基本設計書 1.4)。
-    // M0 はモックのため生成フェーズを通らないので、プレビュー中(MAIN_READY 以上)で
-    // 有効にしてエクスポート経路の動作確認を可能にしている(M4 で本仕様に揃える)。
-    controls.setSaveEnabled(inEdit);
+    // 保存ボタン: 本仕様どおり DONE でのみ有効(基本設計書 1.4)。
+    // M0 の暫定(プレビュー中で有効)から M4 で収束させた
+    controls.setSaveEnabled(data.state === 'DONE');
+
+    // 生成ボタン: MAIN_READY / DONE で有効。GENERATING 中は無効。
+    // タイルが 0 枚なら案内を表示して無効化(基本設計書 4 章)
+    const canGenerate =
+      (data.state === 'MAIN_READY' || data.state === 'DONE') && data.tileCount > 0;
+    controls.setGenerateEnabled(canGenerate);
+    tilesRequiredHint.hidden = !inEdit || data.tileCount > 0;
 
     // タイル一覧は S1(TILES_READY 含む)/S2 の両方で操作できるよう表示位置を移動する
     tileList.attachTo(inEdit ? tileListEditContainer : tileListStartContainer);
@@ -186,6 +195,9 @@ async function main(): Promise<void> {
       tileList.removeTile(id);
       revokeTileUrl(id);
       syncTileStats();
+      // 完成済み generations はタイル構成の変更で無効になる(基本設計書 3.3)。
+      // 差分再マッチ(M6)導入まで、生成のやり直しは生成ボタンで行う
+      store.dispatch({ type: 'GENERATION_INVALIDATED' });
       store.dispatch({ type: 'TILES_REMOVED', remaining: core.getTileCount() });
     } catch (err) {
       console.error('removeTile failed', err);
@@ -234,6 +246,8 @@ async function main(): Promise<void> {
     }
 
     if (added > 0) {
+      // 先に生成結果を無効化(完成済みなら再生成待ちへ戻し、その後枚数を更新)
+      store.dispatch({ type: 'GENERATION_INVALIDATED' });
       store.dispatch({ type: 'TILES_ADDED', count: added });
     }
     syncTileStats();
@@ -249,7 +263,7 @@ async function main(): Promise<void> {
     multiple: true,
     onFiles: (files) => void addTileFiles(files),
   });
-  setupFileZone(requireElement<HTMLButtonElement>('#tile-add-edit'), {
+  setupFileZone(requireElement<HTMLElement>('#tile-drop-zone-edit'), {
     multiple: true,
     onFiles: (files) => void addTileFiles(files),
   });
@@ -260,13 +274,44 @@ async function main(): Promise<void> {
       const grid = await core.setBlockSize(px);
       store.setBlockCounts(grid.totalBlocks, 0);
       preview.drawGrid(grid, core.getBlockMeanColors());
+      // 完成済みの合成結果はグリッドの再計算で無効になる(コア側で composed を破棄)。
+      // 再生成は生成ボタンで行う(M4。M6 で自動再生成に拡張)
+      store.dispatch({ type: 'GENERATION_INVALIDATED' });
     } catch (err) {
       // コア未設定(メイン画像なし)の変更は無視する
       console.error('setBlockSize failed', err);
     }
   });
 
-  // --- S2: 保存(モック exportImage → PNG エンコード → ダウンロード) ---
+  // --- S2: フォトモザイクの生成(M4: P3 マッチング + P4 合成の中)。一括実行 ---
+  controls.handleGenerate(async () => {
+    clearError();
+    demoButton.disabled = true; // 進捗デモと同時実行しない
+    controls.setGenerateEnabled(false);
+    store.dispatch({ type: 'GENERATION_STARTED' });
+    progress.setCounts(0, store.getData().totalBlocks ?? 0);
+    progress.setPhase(phaseLabelFor('match'));
+    try {
+      await core.run();
+      // 一括実行のため完了時点で全ブロックが割当済み(進捗バー 100%)
+      store.dispatch({ type: 'GENERATION_FINISHED' });
+      const data = store.getData();
+      progress.setCounts(data.totalBlocks ?? 0, data.totalBlocks ?? 0);
+      const img = await core.exportImage();
+      preview.drawCompleted(img);
+      progress.setPhase(phaseLabelFor('compose'));
+    } catch (err) {
+      console.error('generate failed', err);
+      // 状態を再生成待ちへ戻した上でエラーを表示
+      store.dispatch({ type: 'GENERATION_FAILED' });
+      showError(messages.errorGenerate);
+      progress.reset();
+    } finally {
+      demoButton.disabled = false;
+    }
+  });
+
+  // --- S2: 保存(コアの完成 RGBA → PNG エンコード → ダウンロード) ---
   controls.handleSave(async () => {
     try {
       progress.setPhase(messages.phaseExport);
@@ -275,7 +320,7 @@ async function main(): Promise<void> {
       downloadBlob(blob, buildDownloadFilename());
     } catch (err) {
       console.error('export failed', err);
-      showError(messages.errorLoadFailed);
+      showError(messages.errorGenerate);
     } finally {
       progress.reset();
     }

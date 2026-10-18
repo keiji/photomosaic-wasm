@@ -10,6 +10,7 @@
 import type {
   CoreBridge,
   GridInfo,
+  MosaicConfig,
   ProgressCallback,
   ProgressEvent,
   RgbaImage,
@@ -92,6 +93,17 @@ export function createMockCore(): CoreBridge {
   let currentBlockSize = DEFAULT_BLOCK_SIZE;
   const progressListeners = new Set<ProgressCallback>();
   let demoTimer: ReturnType<typeof setInterval> | null = null;
+  // 設定パラメータ(M4): 既定値を保持し、setConfig で差し替える
+  let config: MosaicConfig = {
+    w_c: 1.0,
+    w_d: 0.25,
+    usage_penalty: 0.35,
+    neighbor_penalty: 0.5,
+    identical_de: 2.0,
+    usage_cap: 4,
+    color_correct: 0.7,
+    row_batch: 8,
+  };
 
   // --- タイルプール(M3): 特徴量は WASM 実装の簡易版(sRGB 単純平均) ---
   interface MockTile {
@@ -161,6 +173,25 @@ export function createMockCore(): CoreBridge {
 
     clearMainImage(): void {
       mainImage = null;
+    },
+
+    async run(): Promise<void> {
+      // モックでは合成を行わない(exportImage はメイン画像をそのまま返す)。
+      // コア未完成環境での UI 遷移(GENERATING → DONE)確認用のダミー
+      if (!mainImage) {
+        throw new Error('main image is not set');
+      }
+      if (tiles.size === 0) {
+        throw new Error('tile pool is empty');
+      }
+    },
+
+    async getConfig(): Promise<MosaicConfig> {
+      return { ...config };
+    },
+
+    async setConfig(next: MosaicConfig): Promise<void> {
+      config = { ...next };
     },
 
     async addTile(id: bigint, feature: RgbaImage, compose: RgbaImage): Promise<TileInfo> {

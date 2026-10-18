@@ -5,7 +5,7 @@
  * 平均色はコア(P1)が算出した特徴量(mean_lab)を sRGB へ逆変換したもので、
  * bridge 経由で受け取る。UI 層はコア算出値を描画するだけで計算を担わない。
  */
-import type { GridInfo } from '../core/types';
+import type { GridInfo, RgbaImage } from '../core/types';
 
 /** グリッド線の色(dark/light 両方で視認できる中間トーン) */
 const GRID_LINE_COLOR = 'rgba(255, 255, 255, 0.6)';
@@ -65,5 +65,16 @@ export class Preview {
       this.ctx.lineTo(grid.width, py);
     }
     this.ctx.stroke();
+  }
+
+  /**
+   * 完成したフォトモザイク(コアの P4 合成結果)を描画する。
+   * `image` は bridge.exportImage() の戻り値(RGBA)。
+   */
+  drawCompleted(image: RgbaImage): void {
+    this.canvas.width = image.width;
+    this.canvas.height = image.height;
+    this.ctx.imageSmoothingEnabled = false;
+    this.ctx.putImageData(new ImageData(image.data, image.width, image.height), 0, 0);
   }
 }

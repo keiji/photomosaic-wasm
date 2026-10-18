@@ -49,6 +49,29 @@ export interface ProgressEvent {
 export type ProgressCallback = (event: ProgressEvent) => void;
 
 /**
+ * マッチング・合成のパラメータ(詳細設計書 5 章)。
+ * キー名はコア(getConfig/setConfig の JSON)と一致させる。
+ */
+export interface MosaicConfig {
+  /** 色距離 (ΔE76) の重み。既定 1.0、範囲 0.5〜2.0 */
+  w_c: number;
+  /** ディテール差の重み。既定 0.25、範囲 0〜1.0 */
+  w_d: number;
+  /** 使用回数ペナルティ係数 λ。既定 0.35、範囲 0〜1.0 */
+  usage_penalty: number;
+  /** 直上/直左と同一タイルのペナルティ n_p。既定 0.5、範囲 0〜1.0 */
+  neighbor_penalty: number;
+  /** 「視覚上同一」とみなす ΔE76 閾値(固定 2.0) */
+  identical_de: number;
+  /** 1 タイルの最大使用回数。既定 4、0 = 無制限 */
+  usage_cap: number;
+  /** 色補正強度 α。既定 0.7、範囲 0〜1.0 */
+  color_correct: number;
+  /** 行バッチ単位。既定 8、範囲 4〜32 */
+  row_batch: number;
+}
+
+/**
  * タイル情報(詳細設計書 3 章 TileFeature)。
  * id はコア API の u64 に対応するため bigint を用いる。
  */
@@ -70,6 +93,7 @@ export interface TileInfo {
  * コアの論理 API。
  * M2 で setMainImage / getBlockMeanColors の実処理(P1)を WASM で行う。
  * M3 でタイル系(addTile/removeTile/clearTiles)を追加した(P2)。
+ * M4 で一括生成(run)と設定(getConfig/setConfig)を追加した(P3+P4)。
  */
 export interface CoreBridge {
   /** コアのバージョン文字列。UI とコアの不整合検知に使用する */
@@ -101,6 +125,16 @@ export interface CoreBridge {
   getTilesMemoryBytes(): number;
   /** メイン画像の状態を破棄する(リセット。コア内の大容量バッファを開放) */
   clearMainImage(): void;
+  /**
+   * マッチング(P3)+ 合成(P4)を一括実行する(M4)。
+   * メイン画像未設定・タイルプール空の場合は例外。完了後 exportImage で
+   * 合成結果を取得できる。段階的進捗(onProgress/onResult)は M5 で導入
+   */
+  run(): Promise<void>;
+  /** 現在の設定パラメータを取得する(詳細設計書 5 章) */
+  getConfig(): Promise<MosaicConfig>;
+  /** 設定パラメータを上書きする(範囲外は例外) */
+  setConfig(config: MosaicConfig): Promise<void>;
   /** 完成画像(または現時点までの合成結果)の RGBA を取得する(P5 のエンコード前段) */
   exportImage(): Promise<RgbaImage>;
   /** 進捗イベント受け取り登録(M5 でコア駆動の発火に置き換わる) */

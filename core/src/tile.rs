@@ -257,6 +257,31 @@ impl TilePool {
         self.features.values()
     }
 
+    /// 指定 ID の使用回数を 1 加算する(P3 の使用ペナルティ・M4 で使用開始)。
+    /// 存在しない ID は無視する(マッチングは登録済み ID のみを扱うため防御的な no-op)
+    pub fn bump_usage(&mut self, id: u64) {
+        if let Some(feature) = self.features.get_mut(&id) {
+            feature.usage = feature.usage.saturating_add(1);
+        }
+    }
+
+    /// 全タイルの使用回数が上限 `cap` に達しているか(詳細設計書 4.4)。
+    /// `cap == 0` は無制限として常に `false` を返す。プール空も `false`(リセット不要)
+    pub fn all_usage_reached(&self, cap: u32) -> bool {
+        if cap == 0 {
+            return false;
+        }
+        !self.features.is_empty() && self.features.values().all(|feature| feature.usage >= cap)
+    }
+
+    /// 全タイルの使用回数を 0 に戻す(usage cap 到達時の一括リセット、
+    /// および初回マッチング前の正規化。詳細設計書 4.4)
+    pub fn reset_usage(&mut self) {
+        for feature in self.features.values_mut() {
+            feature.usage = 0;
+        }
+    }
+
     /// 指定 ID の合成用サムネイルを返す(P4 合成用。M4 以降で使用)
     pub fn compose_thumb(&self, id: u64) -> Option<(u32, u32, &[u8])> {
         self.compose_thumbs
@@ -268,6 +293,15 @@ impl TilePool {
 impl Default for TilePool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+impl TilePool {
+    /// テスト用にタイル特徴量を直接登録する(add_tile はサムネイル寸法の
+    /// 検証を行うため、距離計算・usage 制御のみの単体テストで使用する)
+    pub(crate) fn insert_feature_for_test(&mut self, feature: TileFeature) {
+        self.features.insert(feature.id, feature);
     }
 }
 

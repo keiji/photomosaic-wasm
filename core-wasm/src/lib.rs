@@ -5,9 +5,11 @@
 //! FFI(unsafe)はこのクレートには出さず、wasm-bindgen の安全な抽象のみを使う。
 
 use photomosaic_core::color::lab_to_srgb8;
+use photomosaic_core::config::MosaicConfig;
 use photomosaic_core::grid::{
     compute_block_features, compute_grid_info, BlockFeature, GridInfo, DEFAULT_BLOCK_SIZE,
 };
+use photomosaic_core::pipeline;
 use photomosaic_core::progress::{Phase, PhasePlan, ProgressThrottle};
 use photomosaic_core::tile::{TileFeature, TilePool};
 use std::cell::RefCell;
@@ -19,6 +21,8 @@ struct MainImageState {
     rgba: Vec<u8>,
     grid: GridInfo,
     features: Vec<BlockFeature>,
+    /// P4 合成結果(run 後に設定。exportImage の対象となる)
+    composed: Option<Vec<u8>>,
 }
 
 thread_local! {
@@ -27,6 +31,9 @@ thread_local! {
 
     /// タイルプール(P2 で解析したタイルの集合。P4 合成用サムネイルも保持)
     static TILE_POOL: RefCell<TilePool> = RefCell::new(TilePool::new());
+
+    /// マッチング・合成のパラメータ(詳細設計書 5 章。setConfig で上書き)
+    static CONFIG: RefCell<MosaicConfig> = RefCell::new(MosaicConfig::default());
 }
 
 /// JS 例外(Error インスタンス)を生成する。
@@ -129,6 +136,7 @@ pub fn set_main_image(rgba: Vec<u8>, width: u32, height: u32) -> Result<JsGridIn
             rgba,
             grid,
             features,
+            composed: None,
         });
     });
 
@@ -150,6 +158,9 @@ pub fn set_block_size(px: u32) -> Result<JsGridInfo, JsValue> {
         let height = main.grid.height;
         main.grid = compute_grid_info(width, height, px);
         main.features = compute_block_features(&main.rgba, width, height, px);
+        // ブロックサイズ変更でグリッドが変わるため、既存の合成結果は無効化する
+        // (基本設計書 3.3: 全ブロック再マッチ → 再合成。生成は再度 run で行う)
+        main.composed = None;
         Ok(JsGridInfo::from_grid(main.grid))
     })
 }
@@ -180,7 +191,8 @@ pub fn get_block_mean_colors() -> Result<Vec<u8>, JsValue> {
 }
 
 /// 現時点の完成画像(または解析対象のメイン画像)RGBA を返す(P5 のエンコード前段)。
-/// コア内バッファを 1 回だけ取り出す設計に対応し、M4 で合成結果の返却に差し替わる。
+/// run 済みの場合は P4 合成結果を、未実行の場合は正規化後のメイン画像を返す
+/// (詳細設計書 2 章 exportImage: 「完成画像(または現時点までの合成結果)」)。
 #[wasm_bindgen]
 pub fn export_main_image() -> Result<Vec<u8>, JsValue> {
     MAIN_IMAGE.with(|cell| {
@@ -188,8 +200,112 @@ pub fn export_main_image() -> Result<Vec<u8>, JsValue> {
         let Some(main) = binding.as_ref() else {
             return Err(js_error("main image is not set"));
         };
-        Ok(main.rgba.clone())
+        Ok(main.composed.as_ref().unwrap_or(&main.rgba).clone())
     })
+}
+
+/// フォトモザイクのマッチング(P3)+ 合成(P4)を一括実行する(M4)。
+///
+/// - メイン画像未設定・タイルプール空の場合はエラー(詳細設計書 6 章:
+///   タイルプール空での run は実行せず UI 層で案内する)
+/// - 完了後、`export_main_image` で合成結果を取得できる
+/// - 進捗イベントの発火(バッチごとの JS 制御返し)は M5 で導入する
+#[wasm_bindgen]
+pub fn run() -> Result<(), JsValue> {
+    let config = CONFIG.with(|cell| *cell.borrow());
+    TILE_POOL.with(|cell| {
+        let mut pool = cell.borrow_mut();
+        MAIN_IMAGE.with(|image_cell| {
+            let mut state = image_cell.borrow_mut();
+            let Some(main) = state.as_mut() else {
+                return Err(js_error("main image is not set"));
+            };
+            let output = pipeline::run_phases(&main.grid, &main.features, &mut pool, &config)
+                .map_err(|err| js_error(&err))?;
+            main.composed = Some(output.rgba);
+            Ok(())
+        })
+    })
+}
+
+/// 現在の設定(詳細設計書 5 章)を JSON 文字列で返す(詳細設計書 2 章 getConfig)
+#[wasm_bindgen]
+pub fn get_config() -> Result<String, JsValue> {
+    let config = CONFIG.with(|cell| *cell.borrow());
+    config_to_json(&config)
+}
+
+/// 設定 JSON でパラメータを上書きする(詳細設計書 2 章 setConfig)。
+/// すべてのフィールドが必須。詳細設計書 5 章の範囲外はエラーになる
+#[wasm_bindgen]
+pub fn set_config(json: String) -> Result<(), JsValue> {
+    let parsed = js_sys::JSON::parse(&json).map_err(|_| js_error("config JSON is invalid"))?;
+    let value = &parsed;
+    let f32_field = |key: &str| -> Result<f32, JsValue> {
+        js_sys::Reflect::get(value, &key.into())
+            .map_err(|_| js_error("config JSON is invalid"))?
+            .as_f64()
+            .map(|v| v as f32)
+            .ok_or_else(|| js_error(&format!("config field '{key}' must be a number")))
+    };
+    let u32_field = |key: &str| -> Result<u32, JsValue> {
+        js_sys::Reflect::get(value, &key.into())
+            .map_err(|_| js_error("config JSON is invalid"))?
+            .as_f64()
+            .and_then(|v| {
+                if v >= 0.0 && v.fract() == 0.0 && v <= f64::from(u32::MAX) {
+                    Some(v as u32)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                js_error(&format!(
+                    "config field '{key}' must be a non-negative integer"
+                ))
+            })
+    };
+    let config = MosaicConfig {
+        w_c: f32_field("w_c")?,
+        w_d: f32_field("w_d")?,
+        usage_penalty: f32_field("usage_penalty")?,
+        neighbor_penalty: f32_field("neighbor_penalty")?,
+        identical_de: f32_field("identical_de")?,
+        usage_cap: u32_field("usage_cap")?,
+        color_correct: f32_field("color_correct")?,
+        row_batch: u32_field("row_batch")?,
+    };
+    config
+        .validate()
+        .map_err(|err| js_error(&err.to_string()))?;
+    CONFIG.with(|cell| {
+        *cell.borrow_mut() = config;
+    });
+    Ok(())
+}
+
+/// MosaicConfig を JSON オブジェクトへ変換する(get_config 用)。
+/// キー名は詳細設計書 5 章のパラメータ名と一致させる
+fn config_to_json(config: &MosaicConfig) -> Result<String, JsValue> {
+    let obj = js_sys::Object::new();
+    let numeric = [
+        ("w_c", f64::from(config.w_c)),
+        ("w_d", f64::from(config.w_d)),
+        ("usage_penalty", f64::from(config.usage_penalty)),
+        ("neighbor_penalty", f64::from(config.neighbor_penalty)),
+        ("identical_de", f64::from(config.identical_de)),
+        ("usage_cap", f64::from(config.usage_cap)),
+        ("color_correct", f64::from(config.color_correct)),
+        ("row_batch", f64::from(config.row_batch)),
+    ];
+    for (key, value) in numeric {
+        js_sys::Reflect::set(obj.as_ref(), &key.into(), &value.into())
+            .map_err(|_| js_error("failed to serialize config"))?;
+    }
+    js_sys::JSON::stringify(obj.as_ref())
+        .map_err(|_| js_error("failed to serialize config"))?
+        .as_string()
+        .ok_or_else(|| js_error("failed to serialize config"))
 }
 
 /// メイン画像の状態を破棄する(リセット操作に対応。大容量バッファを開放する)

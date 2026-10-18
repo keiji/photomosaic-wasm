@@ -5,7 +5,11 @@
 //! - 入出力は RGBA ピクセル配列(バイト順 R→G→B→A、行優先、非プリマルチプライ、sRGB)
 
 pub mod color;
+pub mod compose;
+pub mod config;
 pub mod grid;
+pub mod match_engine;
+pub mod pipeline;
 pub mod progress;
 pub mod tile;
 

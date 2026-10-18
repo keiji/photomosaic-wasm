@@ -16,6 +16,10 @@ export type AppEvent =
   | { type: 'TILES_REMOVED'; remaining: number }
   | { type: 'GENERATION_STARTED' }
   | { type: 'GENERATION_FINISHED' }
+  /** 生成結果が無効になった(ブロックサイズ変更・タイル追加/削除)。再生成に戻す */
+  | { type: 'GENERATION_INVALIDATED' }
+  /** 生成処理が失敗した(エラーを表示して再生成待ちへ戻す) */
+  | { type: 'GENERATION_FAILED' }
   | { type: 'RESET' };
 
 /**
@@ -50,10 +54,18 @@ export function transition(state: AppState, event: AppEvent): AppState {
           return state;
       }
     case 'GENERATION_STARTED':
-      // タイルがあり生成処理を開始できるのは MAIN_READY のみ
-      return state === 'MAIN_READY' ? 'GENERATING' : state;
+      // タイルがあり生成処理を開始できるのは MAIN_READY(初回)と DONE(再生成)
+      return state === 'MAIN_READY' || state === 'DONE' ? 'GENERATING' : state;
     case 'GENERATION_FINISHED':
       return state === 'GENERATING' ? 'DONE' : state;
+    case 'GENERATION_INVALIDATED':
+      // 完成済みの生成結果はブロックサイズ・タイル構成の変更で無効になる。
+      // 再生成(生成ボタン)へ戻る(M4: 自動再生成は M6 の差分再マッチで導入)
+      // 基本設計書 3.3 の再処理ルール(タイル追加 → 再マッチ)は M6 実装
+      return state === 'DONE' ? 'MAIN_READY' : state;
+    case 'GENERATION_FAILED':
+      // 失敗した生成は打ち切り。エラー表示後に再生成待ち(MAIN_READY)へ戻る
+      return state === 'GENERATING' ? 'MAIN_READY' : state;
     case 'RESET':
       // リセット: 全状態クリア → S1 へ
       return 'EMPTY';
