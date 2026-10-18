@@ -50,8 +50,8 @@ export type ProgressCallback = (event: ProgressEvent) => void;
 
 /**
  * コアの論理 API。
- * M1 ではメイン画像系はモック計算(グリッドのみ)で、WASM は getVersion・
- * 進捗デモの経路を本物にする。タイル系(addTile/removeTile)は M3 で追加する。
+ * M2 で setMainImage / getBlockMeanColors の実処理(P1)を WASM で行う。
+ * タイル系(addTile/removeTile)は M3 で追加する。
  */
 export interface CoreBridge {
   /** コアのバージョン文字列。UI とコアの不整合検知に使用する */
@@ -60,6 +60,14 @@ export interface CoreBridge {
   setMainImage(image: RgbaImage): Promise<GridInfo>;
   /** ブロックサイズを変更し、グリッドを再計算する(P1 再実行) */
   setBlockSize(px: number): Promise<GridInfo>;
+  /**
+   * コア算出のブロック平均色を返す(P1 の特徴量から逆変換)。
+   * RGB 3 バイト × ブロック数、行優先(index = row * cols + col)。
+   * メイン画像未設定時は空の配列を返す。
+   */
+  getBlockMeanColors(): Uint8Array;
+  /** メイン画像の状態を破棄する(リセット。コア内の大容量バッファを開放) */
+  clearMainImage(): void;
   /** 完成画像(または現時点までの合成結果)の RGBA を取得する(P5 のエンコード前段) */
   exportImage(): Promise<RgbaImage>;
   /** 進捗イベント受け取り登録(M5 でコア駆動の発火に置き換わる) */

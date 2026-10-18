@@ -1,13 +1,13 @@
 /**
  * コア呼び出しラッパ。
  *
- * handoff/04(M1): ビルド〜配信〜呼び出し〜進捗コールバックの経路を本物にする。
+ * handoff/04(M2): メイン画像解析(P1)を WASM で行う。
  * - wasm-pack 生成物(web/src/wasm/)を動的ロードする(ロードは 1 回のみ)
- * - ロードに失敗した環境では M0 のモックへフォールバックする(UI 開発をブロックしない)
- * - メイン画像系の処理(グリッド計算)は M2 でコアへ移行するまでモックの計算を共用する
+ * - ロードに失敗した環境ではモックへフォールバックする(UI 開発をブロックしない)
+ * - コアの状態(メイン画像・ブロック特徴量)は WASM 内に保持される
  */
 import { createMockCore } from './mockCore';
-import type { CoreBridge, ProgressCallback, ProgressEvent } from './types';
+import type { CoreBridge, GridInfo, ProgressCallback, ProgressEvent } from './types';
 
 /** コア実装の種類(デバッグ表示用) */
 export type CoreImplementation = 'mock' | 'wasm';
@@ -18,6 +18,28 @@ export function getCoreImplementation(): CoreImplementation {
   return currentImplementation;
 }
 
+/** wasm-bindgen の JsGridInfo を型付き GridInfo へ写す(寿命管理のため free する) */
+function toGridInfo(info: {
+  free(): void;
+  readonly width: number;
+  readonly height: number;
+  readonly block_size: number;
+  readonly cols: number;
+  readonly rows: number;
+  readonly total_blocks: number;
+}): GridInfo {
+  const grid: GridInfo = {
+    width: info.width,
+    height: info.height,
+    blockSize: info.block_size,
+    cols: info.cols,
+    rows: info.rows,
+    totalBlocks: info.total_blocks,
+  };
+  info.free();
+  return grid;
+}
+
 /** WASM 実装をロードして構築する(失敗時は例外を投げ、呼び出し側でモックへフォールバック) */
 async function createWasmCore(): Promise<CoreBridge> {
   const wasm = await import('../wasm/photomosaic_core_wasm.js');
@@ -25,7 +47,9 @@ async function createWasmCore(): Promise<CoreBridge> {
   // 初期化が済んだことを往復サンプルで確認する(handoff/02 検収基準)
   wasm.add(1, 1);
 
-  const mock = createMockCore(); // グリッド計算は M2 までモックを共用
+  // 直近のグリッド情報(exportImage の寸法に使用。コア内状態のミラー)
+  let lastGrid: GridInfo | null = null;
+
   const progressListeners = new Set<ProgressCallback>();
   const emit = (event: ProgressEvent): void => {
     for (const listener of progressListeners) {
@@ -38,9 +62,40 @@ async function createWasmCore(): Promise<CoreBridge> {
       return wasm.get_version();
     },
 
-    setMainImage: mock.setMainImage,
-    setBlockSize: mock.setBlockSize,
-    exportImage: mock.exportImage,
+    async setMainImage(image): Promise<GridInfo> {
+      // Vec<u8> 引数への転送は wasm-bindgen がコピー 1 回で行う(handoff/02 2.4)
+      const rgba = new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength);
+      const info = wasm.set_main_image(rgba, image.width, image.height);
+      lastGrid = toGridInfo(info);
+      return lastGrid;
+    },
+
+    async setBlockSize(px): Promise<GridInfo> {
+      const info = wasm.set_block_size(px);
+      lastGrid = toGridInfo(info);
+      return lastGrid;
+    },
+
+    getBlockMeanColors(): Uint8Array {
+      return wasm.get_block_mean_colors();
+    },
+
+    clearMainImage(): void {
+      wasm.clear_main_image();
+      lastGrid = null;
+    },
+
+    async exportImage(): Promise<import('./types').RgbaImage> {
+      // メイン画像はコア内に保持されている(M4 で合成結果の返却に差し替わる)
+      if (!lastGrid) {
+        throw new Error('main image is not set');
+      }
+      const rgba = wasm.export_main_image();
+      // Uint8Array(ArrayBufferLike)から型付きバッファへ複製する(エクスポートは低頻度)
+      const data = new Uint8ClampedArray(rgba.length);
+      data.set(rgba);
+      return { width: lastGrid.width, height: lastGrid.height, data };
+    },
 
     onProgress(callback: ProgressCallback): void {
       progressListeners.add(callback);

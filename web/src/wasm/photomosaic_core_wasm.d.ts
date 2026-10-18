@@ -2,6 +2,21 @@
 /* eslint-disable */
 
 /**
+ * グリッド情報(詳細設計書 3 章 GridInfo の JS 輸出)
+ */
+export class JsGridInfo {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    readonly block_size: number;
+    readonly cols: number;
+    readonly height: number;
+    readonly rows: number;
+    readonly total_blocks: number;
+    readonly width: number;
+}
+
+/**
  * UI 表示用の進捗イベント(文言は持たず、安定識別子 `phase_code` のみ。詳細設計書 7.2)
  */
 export class JsProgressEvent {
@@ -44,18 +59,61 @@ export class ProgressDemo {
 export function add(a: number, b: number): number;
 
 /**
+ * メイン画像の状態を破棄する(リセット操作に対応。大容量バッファを開放する)
+ */
+export function clear_main_image(): void;
+
+/**
+ * 現時点の完成画像(または解析対象のメイン画像)RGBA を返す(P5 のエンコード前段)。
+ * コア内バッファを 1 回だけ取り出す設計に対応し、M4 で合成結果の返却に差し替わる。
+ */
+export function export_main_image(): Uint8Array;
+
+/**
+ * プレビュー描画用のブロック平均色を返す。
+ *
+ * 各ブロックの mean_lab(CIELAB)を sRGB 8bit へ逆変換し、
+ * RGB 3 バイト × ブロック数(行優先)のバイト列として返す。
+ * メイン画像未設定時は空の配列を返す(論理 API の契約)。
+ */
+export function get_block_mean_colors(): Uint8Array;
+
+/**
  * コアバージョン(Web と Android で同一の .wasm を使うための整合確認用)
  */
 export function get_version(): string;
+
+/**
+ * P1 再実行: ブロックサイズを変更してグリッド・ブロック特徴量を再計算する
+ */
+export function set_block_size(px: number): JsGridInfo;
+
+/**
+ * P1 メイン画像解析: グリッド計算とブロック特徴量を計算し、コア内に保持する。
+ *
+ * `rgba` は R→G→B→A 順・行優先・非プリマルチプライ・sRGB の 1 ピクセル 4 バイト。
+ * ブロックサイズはコア既定値(24px)で計算し、変更は [`set_block_size`] で行う。
+ */
+export function set_main_image(rgba: Uint8Array, width: number, height: number): JsGridInfo;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_jsgridinfo_free: (a: number, b: number) => void;
     readonly __wbg_jsprogressevent_free: (a: number, b: number) => void;
     readonly __wbg_progressdemo_free: (a: number, b: number) => void;
     readonly add: (a: number, b: number) => number;
+    readonly clear_main_image: () => void;
+    readonly export_main_image: (a: number) => void;
+    readonly get_block_mean_colors: (a: number) => void;
     readonly get_version: (a: number) => void;
+    readonly jsgridinfo_block_size: (a: number) => number;
+    readonly jsgridinfo_cols: (a: number) => number;
+    readonly jsgridinfo_height: (a: number) => number;
+    readonly jsgridinfo_rows: (a: number) => number;
+    readonly jsgridinfo_total_blocks: (a: number) => number;
+    readonly jsgridinfo_width: (a: number) => number;
     readonly jsprogressevent_assigned_blocks: (a: number) => number;
     readonly jsprogressevent_overall_ratio: (a: number) => number;
     readonly jsprogressevent_phase_code: (a: number, b: number) => void;
@@ -63,8 +121,11 @@ export interface InitOutput {
     readonly jsprogressevent_total_blocks: (a: number) => number;
     readonly progressdemo_new: (a: number) => number;
     readonly progressdemo_tick: (a: number, b: number, c: number) => number;
+    readonly set_block_size: (a: number, b: number) => void;
+    readonly set_main_image: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
     readonly __wbindgen_export: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_export2: (a: number, b: number) => number;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

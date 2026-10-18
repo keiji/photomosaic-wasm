@@ -107,6 +107,44 @@ export function createMockCore(): CoreBridge {
       return computeGrid(mainImage.width, mainImage.height, px);
     },
 
+    getBlockMeanColors(): Uint8Array {
+      if (!mainImage) {
+        return new Uint8Array(0);
+      } // モック簡易実装: sRGB の単純平均(WASM 実装では線形平均 → CIELAB → 逆変換)
+      const grid = computeGrid(mainImage.width, mainImage.height, currentBlockSize);
+      const colors = new Uint8Array(grid.totalBlocks * 3);
+      for (let row = 0; row < grid.rows; row++) {
+        for (let col = 0; col < grid.cols; col++) {
+          const x0 = col * grid.blockSize;
+          const y0 = row * grid.blockSize;
+          const bw = Math.min(grid.blockSize, mainImage.width - x0);
+          const bh = Math.min(grid.blockSize, mainImage.height - y0);
+          let sumR = 0;
+          let sumG = 0;
+          let sumB = 0;
+          for (let y = y0; y < y0 + bh; y++) {
+            let offset = (y * mainImage.width + x0) * 4;
+            for (let x = 0; x < bw; x++) {
+              sumR += mainImage.data[offset] as number;
+              sumG += mainImage.data[offset + 1] as number;
+              sumB += mainImage.data[offset + 2] as number;
+              offset += 4;
+            }
+          }
+          const count = bw * bh;
+          const out = (row * grid.cols + col) * 3;
+          colors[out] = Math.round(sumR / count);
+          colors[out + 1] = Math.round(sumG / count);
+          colors[out + 2] = Math.round(sumB / count);
+        }
+      }
+      return colors;
+    },
+
+    clearMainImage(): void {
+      mainImage = null;
+    },
+
     async exportImage(): Promise<RgbaImage> {
       if (!mainImage) {
         throw new Error('main image is not set');

@@ -7,7 +7,6 @@
  */
 import './style.css';
 import { InvalidFileError, loadMainImage } from './io/imageLoader';
-import type { LoadedImage } from './io/imageLoader';
 import { buildDownloadFilename, downloadBlob, encodePng } from './io/exporter';
 import { createCoreBridge, getCoreImplementation } from './core/bridge';
 import { AppStore } from './state/store';
@@ -84,8 +83,6 @@ async function main(): Promise<void> {
     }
   });
 
-  let mainImage: LoadedImage | null = null;
-
   const showError = (message: string): void => {
     errorNotice.textContent = message;
     errorNotice.hidden = false;
@@ -126,11 +123,11 @@ async function main(): Promise<void> {
       progress.setPhase(messages.phaseLoadMain);
       try {
         const image = await loadMainImage(file);
-        mainImage = image;
         const grid = await core.setMainImage(image);
         store.dispatch({ type: 'MAIN_IMAGE_SET' });
         store.setBlockCounts(grid.totalBlocks, 0);
-        preview.drawGrid(image, grid);
+        // プレビューはコア算出のブロック平均色(P1 特徴量)で描画する
+        preview.drawGrid(grid, core.getBlockMeanColors());
         progress.setPhase(messages.phaseMainAnalyze);
       } catch (err) {
         if (err instanceof InvalidFileError) {
@@ -145,12 +142,12 @@ async function main(): Promise<void> {
 
   // --- S2: ブロックサイズ変更(300ms デバウンス後にグリッド再計算) ---
   controls.handleBlockSizeChange(async (px) => {
-    if (!mainImage) return;
     try {
       const grid = await core.setBlockSize(px);
       store.setBlockCounts(grid.totalBlocks, 0);
-      preview.drawGrid(mainImage, grid);
+      preview.drawGrid(grid, core.getBlockMeanColors());
     } catch (err) {
+      // コア未設定(メイン画像なし)の変更は無視する
       console.error('setBlockSize failed', err);
     }
   });
@@ -173,7 +170,7 @@ async function main(): Promise<void> {
   // --- リセット(S2 の「戻る」がリセットを兼ねる: 全状態クリア → S1 へ) ---
   const reset = (): void => {
     store.dispatch({ type: 'RESET' });
-    mainImage = null;
+    core.clearMainImage();
     clearError();
     progress.reset();
     controls.setBlockSizeValue(24);

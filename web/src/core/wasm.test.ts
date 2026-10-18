@@ -80,4 +80,59 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       demo.free();
     }
   });
+
+  describe('メイン画像解析(P1)', () => {
+    it('set_main_image で GridInfo とコア算出の平均色を取得できる', () => {
+      // 2x2 の単色赤
+      const rgba = new Uint8Array([255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255]);
+      const info = wasm.set_main_image(rgba, 2, 2);
+      try {
+        expect(info.width).toBe(2);
+        expect(info.height).toBe(2);
+        expect(info.block_size).toBe(24);
+        expect(info.cols).toBe(1);
+        expect(info.rows).toBe(1);
+        expect(info.total_blocks).toBe(1);
+      } finally {
+        info.free();
+      }
+
+      // 単色赤の平均色は赤そのもの(線形平均 → Lab → sRGB 逆変換の往復)
+      const colors = wasm.get_block_mean_colors();
+      expect(Array.from(colors)).toEqual([255, 0, 0]);
+    });
+
+    it('set_block_size でグリッドが再計算される', () => {
+      const rgba = new Uint8Array(4 * 4 * 4); // 4x4 画像
+      wasm.set_main_image(rgba, 4, 4);
+      const info = wasm.set_block_size(2);
+      try {
+        expect(info.cols).toBe(2);
+        expect(info.rows).toBe(2);
+        expect(info.total_blocks).toBe(4);
+      } finally {
+        info.free();
+      }
+      // 4 ブロック分の平均色
+      expect(wasm.get_block_mean_colors().length).toBe(4 * 3);
+    });
+
+    it('export_main_image が設定した RGBA を返す', () => {
+      const rgba = new Uint8Array([1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]);
+      wasm.set_main_image(rgba, 2, 2);
+      const exported = wasm.export_main_image();
+      expect(Array.from(exported)).toEqual(Array.from(rgba));
+    });
+
+    it('clear_main_image 後はコア状態が空になる', () => {
+      wasm.set_main_image(new Uint8Array(2 * 2 * 4), 2, 2);
+      wasm.clear_main_image();
+      expect(() => wasm.set_block_size(24)).toThrow();
+      expect(wasm.get_block_mean_colors().length).toBe(0);
+    });
+
+    it('rgba 長さ不一致はエラーになる', () => {
+      expect(() => wasm.set_main_image(new Uint8Array(3), 2, 2)).toThrow();
+    });
+  });
 });

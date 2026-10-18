@@ -4,8 +4,33 @@
 //! アルゴリズムは [`photomosaic_core`](photomosaic_core) クレートに置く。
 //! FFI(unsafe)はこのクレートには出さず、wasm-bindgen の安全な抽象のみを使う。
 
+use photomosaic_core::color::lab_to_srgb8;
+use photomosaic_core::grid::{
+    compute_block_features, compute_grid_info, BlockFeature, GridInfo, DEFAULT_BLOCK_SIZE,
+};
 use photomosaic_core::progress::{Phase, PhasePlan, ProgressThrottle};
+use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
+
+/// コア内に保持するメイン画像の状態(詳細設計書 9 章のメモリ設計に基づき、
+/// 解析・出力用の RGBA をコア内に保持する。exportImage で 1 回だけ取り出す)。
+struct MainImageState {
+    rgba: Vec<u8>,
+    grid: GridInfo,
+    features: Vec<BlockFeature>,
+}
+
+thread_local! {
+    // WASM はシングルスレッドで動く(詳細設計書 8.1)ため thread_local + RefCell で十分
+    static MAIN_IMAGE: RefCell<Option<MainImageState>> = const { RefCell::new(None) };
+}
+
+/// JS 例外(Error インスタンス)を生成する。
+/// 文字列を直接投げると JS 側のテスト・エラー処理で扱いにくいため、
+/// エラーは必ず Error インスタンスとして伝播させる。
+fn js_error(message: &str) -> JsValue {
+    js_sys::Error::new(message).into()
+}
 
 /// コアバージョン(Web と Android で同一の .wasm を使うための整合確認用)
 #[wasm_bindgen]
@@ -17,6 +42,158 @@ pub fn get_version() -> String {
 #[wasm_bindgen]
 pub fn add(a: i32, b: i32) -> i32 {
     a + b
+}
+
+/// グリッド情報(詳細設計書 3 章 GridInfo の JS 輸出)
+#[wasm_bindgen]
+pub struct JsGridInfo {
+    width: u32,
+    height: u32,
+    block_size: u32,
+    cols: u32,
+    rows: u32,
+    total_blocks: u32,
+}
+
+impl JsGridInfo {
+    fn from_grid(grid: GridInfo) -> JsGridInfo {
+        JsGridInfo {
+            width: grid.width,
+            height: grid.height,
+            block_size: grid.block_size,
+            cols: grid.cols,
+            rows: grid.rows,
+            total_blocks: grid.total_blocks,
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl JsGridInfo {
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn cols(&self) -> u32 {
+        self.cols
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn total_blocks(&self) -> u32 {
+        self.total_blocks
+    }
+}
+
+/// P1 メイン画像解析: グリッド計算とブロック特徴量を計算し、コア内に保持する。
+///
+/// `rgba` は R→G→B→A 順・行優先・非プリマルチプライ・sRGB の 1 ピクセル 4 バイト。
+/// ブロックサイズはコア既定値(24px)で計算し、変更は [`set_block_size`] で行う。
+#[wasm_bindgen]
+pub fn set_main_image(rgba: Vec<u8>, width: u32, height: u32) -> Result<JsGridInfo, JsValue> {
+    let pixel_count = usize::try_from(
+        width
+            .checked_mul(height)
+            .ok_or_else(|| js_error("image size overflow"))?,
+    )
+    .map_err(|_| js_error("image size overflow"))?;
+    if rgba.len() != pixel_count * 4 {
+        return Err(js_error("rgba buffer length mismatch"));
+    }
+
+    let grid = compute_grid_info(width, height, DEFAULT_BLOCK_SIZE);
+    let features = compute_block_features(&rgba, width, height, DEFAULT_BLOCK_SIZE);
+
+    MAIN_IMAGE.with(|cell| {
+        *cell.borrow_mut() = Some(MainImageState {
+            rgba,
+            grid,
+            features,
+        });
+    });
+
+    Ok(JsGridInfo::from_grid(grid))
+}
+
+/// P1 再実行: ブロックサイズを変更してグリッド・ブロック特徴量を再計算する
+#[wasm_bindgen]
+pub fn set_block_size(px: u32) -> Result<JsGridInfo, JsValue> {
+    if px == 0 {
+        return Err(js_error("block size must be positive"));
+    }
+    MAIN_IMAGE.with(|cell| -> Result<JsGridInfo, JsValue> {
+        let mut state = cell.borrow_mut();
+        let Some(main) = state.as_mut() else {
+            return Err(js_error("main image is not set"));
+        };
+        let width = main.grid.width;
+        let height = main.grid.height;
+        main.grid = compute_grid_info(width, height, px);
+        main.features = compute_block_features(&main.rgba, width, height, px);
+        Ok(JsGridInfo::from_grid(main.grid))
+    })
+}
+
+/// プレビュー描画用のブロック平均色を返す。
+///
+/// 各ブロックの mean_lab(CIELAB)を sRGB 8bit へ逆変換し、
+/// RGB 3 バイト × ブロック数(行優先)のバイト列として返す。
+/// メイン画像未設定時は空の配列を返す(論理 API の契約)。
+#[wasm_bindgen]
+pub fn get_block_mean_colors() -> Result<Vec<u8>, JsValue> {
+    MAIN_IMAGE.with(|cell| {
+        let binding = cell.borrow();
+        let Some(main) = binding.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut colors = Vec::with_capacity(main.features.len() * 3);
+        for feature in &main.features {
+            let [r, g, b] = lab_to_srgb8(
+                f64::from(feature.mean_lab[0]),
+                f64::from(feature.mean_lab[1]),
+                f64::from(feature.mean_lab[2]),
+            );
+            colors.extend_from_slice(&[r, g, b]);
+        }
+        Ok(colors)
+    })
+}
+
+/// 現時点の完成画像(または解析対象のメイン画像)RGBA を返す(P5 のエンコード前段)。
+/// コア内バッファを 1 回だけ取り出す設計に対応し、M4 で合成結果の返却に差し替わる。
+#[wasm_bindgen]
+pub fn export_main_image() -> Result<Vec<u8>, JsValue> {
+    MAIN_IMAGE.with(|cell| {
+        let binding = cell.borrow();
+        let Some(main) = binding.as_ref() else {
+            return Err(js_error("main image is not set"));
+        };
+        Ok(main.rgba.clone())
+    })
+}
+
+/// メイン画像の状態を破棄する(リセット操作に対応。大容量バッファを開放する)
+#[wasm_bindgen]
+pub fn clear_main_image() {
+    MAIN_IMAGE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
 }
 
 /// 進捗デモ用のスロットル判定(ダミー処理を 16ms 間隔のバッチに区切って進める)。
