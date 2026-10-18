@@ -43,30 +43,24 @@ npm run dev
 
 ### コア(WASM)のビルド
 
-wasm-pack 生成物(`web/src/wasm/`)はリポジトリに同梱しているため、**clone 後に Rust 環境がなくても dev/build が動作する**。
+wasm-pack 生成物(`web/src/wasm/`)はリポジトリに同梱しており、**CI が最新コアソースから自動で再ビルドしてコミットする**。そのため、Web アプリの開発に Rust 環境は不要。
 
-コアを変更した場合は生成物を更新する。Rust ツールチェーンのバージョンは `rust-toolchain.toml` で固定されており(rustup が自動で選択)、CI も同一バージョンでビルドします。初回のみ、Rust ツールチェーンを導入する([handoff/02](./docs/handoff/02_wasm_build_guide.md) の 2.1 節と同じ手順):
+コア(`core/`・`core-wasm/`)を変更した場合も、ローカルでの再ビルドは不要(プッシュ後の CI が生成物を更新する)。ローカルで試す場合は以下を実行する:
 
 ```bash
-# 1. Rust 本体(rustup)
+# 初回のみ: Rust ツールチェーンの導入
+# ツールチェーンのバージョンは rust-toolchain.toml で固定(rustup が自動で選択)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
-
-# 2. WASM ターゲット
 rustup target add wasm32-unknown-unknown
-
-# 3. wasm-pack(バインディング生成・パッケージ化の標準ツール)
 curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-```
 
-生成物の更新:
-
-```bash
+# 生成物のローカル再ビルド
 cd web
 npm run wasm:build   # wasm-pack build core-wasm --release --target web → src/wasm/ へ出力
 ```
 
-生成物の更新漏れは CI が検知する(ビルド結果との差分検証)。コア側の検査:
+コア側の検査:
 
 ```bash
 cd core
