@@ -97,6 +97,7 @@ export function createMockCore(): CoreBridge {
     usage_penalty: 0.35,
     neighbor_penalty: 0.5,
     identical_de: 2.0,
+    improve_margin: 1.0,
     usage_cap: 4,
     color_correct: 0.7,
     row_batch: 8,
@@ -124,6 +125,80 @@ export function createMockCore(): CoreBridge {
 
   /** バッチ境界ごとの待機(UI への制御返し。詳細設計書 8.1 のモック版) */
   const nextBatch = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 16));
+
+  /**
+   * ダミーの生成実行(run / rematch 共通)。
+   * メイン画像・タイルの有無を検証したうえで、行バッチ単位の進捗・部分結果
+   * (メイン画像の行コピー)を発火し、cancel() はバッチ境界で止める
+   */
+  const simulateRun = async (): Promise<void> => {
+    if (!mainImage) {
+      throw new Error('main image is not set');
+    }
+    if (tiles.size === 0) {
+      throw new Error('tile pool is empty');
+    }
+    const grid = computeGrid(mainImage.width, mainImage.height, currentBlockSize);
+    const throttle = new DemoThrottle();
+    const handle = { canceled: false };
+    activeRun = handle;
+    runStartedAt = performance.now();
+
+    const totalBlocks = grid.totalBlocks;
+    // P3 マッチング: 行バッチ単位で進捗を発火(16ms / 1% 規則を模倣)
+    for (let matched = 0; matched < grid.rows; matched += MOCK_ROW_BATCH) {
+      const assignedRows = Math.min(matched + MOCK_ROW_BATCH, grid.rows);
+      if (handle.canceled) {
+        activeRun = null;
+        return;
+      }
+      const ratio = assignedRows / grid.rows;
+      const nowMs = performance.now() - runStartedAt;
+      if (throttle.shouldEmit(nowMs, ratio)) {
+        emit({
+          phaseCode: 'match',
+          phaseRatio: ratio,
+          overallRatio: ratio,
+          assignedBlocks: assignedRows * grid.cols,
+          totalBlocks,
+        });
+      }
+      await nextBatch();
+    }
+    // P4 合成: 行バッチごとに部分結果(メイン画像の行コピー)を発火
+    for (let rowBegin = 0; rowBegin < grid.rows; rowBegin += MOCK_ROW_BATCH) {
+      if (handle.canceled) {
+        activeRun = null;
+        return;
+      }
+      const rowEnd = Math.min(rowBegin + MOCK_ROW_BATCH, grid.rows);
+      const pixelBegin = rowBegin * grid.blockSize;
+      const pixelEnd = Math.min(rowEnd * grid.blockSize, mainImage.height);
+      const bytesPerRow = mainImage.width * 4;
+      const rgba = new Uint8Array(
+        mainImage.data.buffer.slice(pixelBegin * bytesPerRow, pixelEnd * bytesPerRow),
+      );
+      emitResult({
+        blockRowBegin: rowBegin,
+        blockRowEnd: rowEnd,
+        blockSize: grid.blockSize,
+        width: grid.width,
+        rgba,
+      });
+      const ratio = rowEnd / grid.rows;
+      if (throttle.shouldEmit(performance.now() - runStartedAt, ratio)) {
+        emit({
+          phaseCode: 'compose',
+          phaseRatio: ratio,
+          overallRatio: ratio,
+          assignedBlocks: totalBlocks,
+          totalBlocks,
+        });
+      }
+      await nextBatch();
+    }
+    activeRun = null;
+  };
 
   return {
     async getVersion(): Promise<string> {
@@ -184,73 +259,15 @@ export function createMockCore(): CoreBridge {
     async run(): Promise<void> {
       // モックではモザイク合成を行わず、行バッチ単位の進捗・部分結果
       // (メイン画像の行コピー)を発火する(コア実装環境での UI 遷移
-      // GENERATING → DONE と進捗表示・部分描画の確認用のダミー)
-      if (!mainImage) {
-        throw new Error('main image is not set');
-      }
-      if (tiles.size === 0) {
-        throw new Error('tile pool is empty');
-      }
-      const grid = computeGrid(mainImage.width, mainImage.height, currentBlockSize);
-      const throttle = new DemoThrottle();
-      const handle = { canceled: false };
-      activeRun = handle;
-      runStartedAt = performance.now();
+      // GENERATING → DONE と進捗表示・部分描画の確認用のダミー)。
+      // 差分再マッチ(M6)のリマッチ/差し替えはモックでは区別せず同一のダミー
+      return simulateRun();
+    },
 
-      const totalBlocks = grid.totalBlocks;
-      // P3 マッチング: 行バッチ単位で進捗を発火(16ms / 1% 規則を模倣)
-      for (let matched = 0; matched < grid.rows; matched += MOCK_ROW_BATCH) {
-        const assignedRows = Math.min(matched + MOCK_ROW_BATCH, grid.rows);
-        if (handle.canceled) {
-          activeRun = null;
-          return;
-        }
-        const ratio = assignedRows / grid.rows;
-        const nowMs = performance.now() - runStartedAt;
-        if (throttle.shouldEmit(nowMs, ratio)) {
-          emit({
-            phaseCode: 'match',
-            phaseRatio: ratio,
-            overallRatio: ratio,
-            assignedBlocks: assignedRows * grid.cols,
-            totalBlocks,
-          });
-        }
-        await nextBatch();
-      }
-      // P4 合成: 行バッチごとに部分結果(メイン画像の行コピー)を発火
-      for (let rowBegin = 0; rowBegin < grid.rows; rowBegin += MOCK_ROW_BATCH) {
-        if (handle.canceled) {
-          activeRun = null;
-          return;
-        }
-        const rowEnd = Math.min(rowBegin + MOCK_ROW_BATCH, grid.rows);
-        const pixelBegin = rowBegin * grid.blockSize;
-        const pixelEnd = Math.min(rowEnd * grid.blockSize, mainImage.height);
-        const bytesPerRow = mainImage.width * 4;
-        const rgba = new Uint8Array(
-          mainImage.data.buffer.slice(pixelBegin * bytesPerRow, pixelEnd * bytesPerRow),
-        );
-        emitResult({
-          blockRowBegin: rowBegin,
-          blockRowEnd: rowEnd,
-          blockSize: grid.blockSize,
-          width: grid.width,
-          rgba,
-        });
-        const ratio = rowEnd / grid.rows;
-        if (throttle.shouldEmit(performance.now() - runStartedAt, ratio)) {
-          emit({
-            phaseCode: 'compose',
-            phaseRatio: ratio,
-            overallRatio: ratio,
-            assignedBlocks: totalBlocks,
-            totalBlocks,
-          });
-        }
-        await nextBatch();
-      }
-      activeRun = null;
+    async rematch(): Promise<void> {
+      // 差分再マッチ(M6)のダミー: run と同一の進捗・部分結果を発火する。
+      // (モックに割当表の概念はないため、未確定ブロックのみの部分合成は模倣しない)
+      return simulateRun();
     },
 
     cancel(): void {

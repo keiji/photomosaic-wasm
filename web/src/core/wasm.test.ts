@@ -237,6 +237,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
         usage_penalty: 0.35,
         neighbor_penalty: 0.5,
         identical_de: 2.0,
+        improve_margin: 1.0,
         usage_cap: 4,
         color_correct: 0.7,
         row_batch: 8,
@@ -258,8 +259,12 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       expect(() => wasm.set_config(JSON.stringify({ ...config, color_correct: 1.5 }))).toThrow(
         /color_correct/,
       );
+      expect(() => wasm.set_config(JSON.stringify({ ...config, improve_margin: 0.4 }))).toThrow(
+        /improve_margin/,
+      );
       // 失敗した set は既存設定(既定へ復元済み)を壊さない
       expect(JSON.parse(wasm.get_config()).color_correct).toBeCloseTo(0.7, 5);
+      expect(JSON.parse(wasm.get_config()).improve_margin).toBeCloseTo(1.0, 5);
       // 不正 JSON もエラー
       expect(() => wasm.set_config('{ invalid')).toThrow();
     });
@@ -319,6 +324,172 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       wasm.set_block_size(12); // composed はクリア
       const exported = wasm.export_main_image();
       expect(Array.from(exported)).toEqual(Array.from(main));
+    });
+  });
+
+  describe('差分再マッチ(M6: タイル追加・削除の追随)', () => {
+    /** 単色の特徴量サムネイル(32×32)を生成する */
+    const featureThumb = (r: number, g: number, b: number): Uint8Array => {
+      const data = new Uint8Array(32 * 32 * 4);
+      for (let offset = 0; offset < data.length; offset += 4) {
+        data[offset] = r;
+        data[offset + 1] = g;
+        data[offset + 2] = b;
+        data[offset + 3] = 255;
+      }
+      return data;
+    };
+
+    /** 単色の合成用サムネイルを生成する */
+    const composeThumb = (w: number, h: number, rgb: [number, number, number]): Uint8Array => {
+      const data = new Uint8Array(w * h * 4);
+      for (let offset = 0; offset < data.length; offset += 4) {
+        data[offset] = rgb[0];
+        data[offset + 1] = rgb[1];
+        data[offset + 2] = rgb[2];
+        data[offset + 3] = 255;
+      }
+      return data;
+    };
+
+    /** 左半分赤・右半分青のメイン画像(48x24 = 2x1 ブロック・block 24) */
+    const redBlueMain = (): Uint8Array => {
+      const main = new Uint8Array(48 * 24 * 4);
+      for (let y = 0; y < 24; y++) {
+        for (let x = 0; x < 48; x++) {
+          const offset = (y * 48 + x) * 4;
+          const rgb: [number, number, number] = x < 24 ? [255, 0, 0] : [0, 0, 255];
+          main[offset] = rgb[0];
+          main[offset + 1] = rgb[1];
+          main[offset + 2] = rgb[2];
+          main[offset + 3] = 255;
+        }
+      }
+      return main;
+    };
+
+    /** begin から step ループまで(rematch / run 由来を問わず)駆動する */
+    const driveSteps = (): number => {
+      let events = 0;
+      let clock = 0;
+      for (;;) {
+        const out = wasm.step_run(++clock * 20);
+        // take 系ゲッターは 1 回の参照で消費するため、まず変数へ受ける
+        const done = out.done;
+        const progress = out.progress;
+        if (progress) {
+          events += 1;
+          progress.free();
+        }
+        const result = out.result;
+        if (result) {
+          result.free();
+        }
+        out.free();
+        if (done) break;
+      }
+      return events;
+    };
+
+    afterEach(() => {
+      wasm.clear_tiles();
+      wasm.clear_main_image();
+    });
+
+    it('タイル追加後の rematch で差し替え評価が行われ、出力が追従する', () => {
+      wasm.set_main_image(redBlueMain(), 48, 24);
+      // 遠いタイルのみ(青系を欠く)
+      wasm.add_tile(1n, featureThumb(40, 0, 0), composeThumb(64, 64, [40, 0, 0]), 64, 64);
+      wasm.run();
+      const before = wasm.export_main_image();
+
+      // 青タイルを追加して差分再マッチ: 右ブロック(青)の割当が改善される
+      wasm.add_tile(2n, featureThumb(0, 0, 255), composeThumb(64, 64, [0, 0, 255]), 64, 64);
+      wasm.begin_rematch();
+      driveSteps();
+
+      const after = wasm.export_main_image();
+      expect(after.length).toBe(before.length);
+      // 出力が変化する(青ブロックの合成がタイル 2 で置き換わる)
+      expect(Array.from(after)).not.toEqual(Array.from(before));
+      // 右ブロックの中心が青系になる(追加タイルで差し替えられている)
+      const blueCenter = after[(12 * 48 + 36) * 4];
+      expect(blueCenter).toBeLessThan(55);
+    });
+
+    it('タイル削除後の rematch で該当ブロックが現プールで再割当てされる', () => {
+      wasm.set_main_image(redBlueMain(), 48, 24);
+      wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 64, [255, 0, 0]), 64, 64);
+      wasm.add_tile(2n, featureThumb(0, 0, 255), composeThumb(64, 64, [0, 0, 255]), 64, 64);
+      wasm.run();
+      const before = wasm.export_main_image();
+      const blueCenterBefore = before[(12 * 48 + 36) * 4];
+      expect(blueCenterBefore).toBeLessThan(55);
+
+      // 青タイルを削除 → 差分再マッチ: 右ブロックは残ったタイル 1 で再割当てされる
+      wasm.remove_tile(2n);
+      wasm.begin_rematch();
+      driveSteps();
+      const after = wasm.export_main_image();
+      // 出力は変化する(右ブロックが再合成される)
+      expect(Array.from(after)).not.toEqual(Array.from(before));
+      // 参照検証: 現プール(タイル 1 のみ)でのフル run の出力と一致する
+      // (α=0.7 の色補正で各ブロックのトーンは保有されるため、block 単位の
+      // 色の直接比較ではなく決定的な参照出力で確認する)
+      wasm.clear_tiles();
+      wasm.set_main_image(redBlueMain(), 48, 24);
+      wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 64, [255, 0, 0]), 64, 64);
+      wasm.run();
+      const reference = wasm.export_main_image();
+      expect(Array.from(after)).toEqual(Array.from(reference));
+    });
+
+    it('再マッチ不要な rematch(import なし・未確定なし)は即時に完了する', () => {
+      wasm.set_main_image(redBlueMain(), 48, 24);
+      wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 64, [255, 0, 0]), 64, 64);
+      wasm.run();
+      const before = Array.from(wasm.export_main_image());
+
+      wasm.begin_rematch();
+      // 2 ブロックは 1 バッチで走査が完了し、合成対象なしで即時完了する
+      let steps = 0;
+      for (;;) {
+        const out = wasm.step_run(++steps * 20);
+        const done = out.done;
+        const progress = out.progress;
+        if (progress) {
+          progress.free();
+        }
+        const result = out.result;
+        if (result) {
+          result.free();
+        }
+        out.free();
+        if (done) break;
+      }
+      expect(steps).toBeLessThanOrEqual(2);
+      // 合成結果は変化しない
+      expect(Array.from(wasm.export_main_image())).toEqual(before);
+    });
+
+    it('タイルプール空での begin_rematch はエラーになる', () => {
+      wasm.set_main_image(redBlueMain(), 48, 24);
+      expect(() => wasm.begin_rematch()).toThrow(/tile pool is empty/);
+    });
+
+    it('set_block_size 後の rematch は全ブロックを再マッチする(フル扱い)', () => {
+      wasm.set_main_image(redBlueMain(), 48, 24);
+      wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 64, [255, 0, 0]), 64, 64);
+      wasm.add_tile(2n, featureThumb(0, 0, 255), composeThumb(64, 64, [0, 0, 255]), 64, 64);
+      wasm.run();
+      wasm.set_block_size(12); // 4x2 ブロック・割当表クリア
+      wasm.begin_rematch();
+      const events = driveSteps();
+      // フルマッチと同一の進捗が流れる(最後に合成フェーズへ到達する)
+      expect(events).toBeGreaterThan(0);
+      // 完成画像が得られる(全ブロック確定)
+      const exported = wasm.export_main_image();
+      expect(exported.length).toBe(48 * 24 * 4);
     });
   });
 

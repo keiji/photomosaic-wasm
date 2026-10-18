@@ -9,7 +9,7 @@ use photomosaic_core::config::MosaicConfig;
 use photomosaic_core::grid::{
     compute_block_features, compute_grid_info, BlockFeature, GridInfo, DEFAULT_BLOCK_SIZE,
 };
-use photomosaic_core::pipeline;
+use photomosaic_core::pipeline::{self, MatchMode};
 use photomosaic_core::progress::ProgressEvent;
 use photomosaic_core::tile::{TileFeature, TilePool};
 use std::cell::RefCell;
@@ -21,6 +21,11 @@ struct MainImageState {
     rgba: Vec<u8>,
     grid: GridInfo,
     features: Vec<BlockFeature>,
+    /// 現在の割当表(全ブロック分。None = 未確定。M6 差分再マッチの基礎)。
+    /// run 中は実行状態へ移動し、完了・キャンセル時に確定済み分が戻る
+    assigned: Vec<Option<u64>>,
+    /// 現在の割当表の計算後にタイルが追加されたか(差し替え評価の要否。M6)
+    tiles_added_since_match: bool,
     /// P4 合成結果(run 後に設定。exportImage の対象となる)
     composed: Option<Vec<u8>>,
     /// 進行中の行バッチ実行(M5: begin_run で開始、step_run で駆動)
@@ -43,6 +48,11 @@ thread_local! {
 /// エラーは必ず Error インスタンスとして伝播させる。
 fn js_error(message: &str) -> JsValue {
     js_sys::Error::new(message).into()
+}
+
+/// u32 → usize の変換(wasm32 でも 4 GB 未満の寸法を安全に扱う)
+fn to_usize(value: u32) -> usize {
+    usize::try_from(value).expect("value fits usize")
 }
 
 /// コアバージョン(Web と Android で同一の .wasm を使うための整合確認用)
@@ -138,6 +148,8 @@ pub fn set_main_image(rgba: Vec<u8>, width: u32, height: u32) -> Result<JsGridIn
             rgba,
             grid,
             features,
+            assigned: Vec::new(),
+            tiles_added_since_match: false,
             composed: None,
             run: None,
         });
@@ -147,6 +159,10 @@ pub fn set_main_image(rgba: Vec<u8>, width: u32, height: u32) -> Result<JsGridIn
 }
 
 /// P1 再実行: ブロックサイズを変更してグリッド・ブロック特徴量を再計算する
+///
+/// 基本設計書 3.3: グリッド再計算 → 全ブロック再マッチ → 再合成。
+/// タイル特徴量はブロックサイズに依存しないため P2 は再実行しない(キャッシュ再利用)。
+/// 割当表は全ブロック未確定に戻る(次の run で全ブロック再マッチになる)
 #[wasm_bindgen]
 pub fn set_block_size(px: u32) -> Result<JsGridInfo, JsValue> {
     if px == 0 {
@@ -161,8 +177,10 @@ pub fn set_block_size(px: u32) -> Result<JsGridInfo, JsValue> {
         let height = main.grid.height;
         main.grid = compute_grid_info(width, height, px);
         main.features = compute_block_features(&main.rgba, width, height, px);
-        // ブロックサイズ変更でグリッドが変わるため、既存の合成結果は無効化する
-        // (基本設計書 3.3: 全ブロック再マッチ → 再合成。生成は再度 run で行う)
+        // ブロックサイズ変更でグリッドが変わるため、既存の割当表・合成結果は
+        // 無効化する(全ブロックが未確定。生成は再度 run で行う)
+        main.assigned = Vec::new();
+        main.tiles_added_since_match = false;
         main.composed = None;
         // 進行中の行バッチ実行もグリッドと不整合になるため破棄する
         main.run = None;
@@ -216,7 +234,8 @@ pub fn export_main_image() -> Result<Vec<u8>, JsValue> {
 /// - 実行は行バッチ(row_batch 行)単位で進む。ホストは [`step_run`] を
 ///   完了まで繰り返し呼び出し、バッチ境界で JS へ制御を返して
 ///   UI 更新・進捗表示・部分描画を介在させる(詳細設計書 8.1)
-/// - 使用回数 usage は開始時に正規化する(M4 と同一挙動)
+/// - 使用回数 usage は開始時に正規化する(M4 と同一挙動)。
+///   差分再マッチ([`begin_rematch`])とは異なり全ブロックを再マッチする
 /// - 進行中の別 run があれば破棄して新しく開始する
 #[wasm_bindgen]
 pub fn begin_run() -> Result<(), JsValue> {
@@ -233,8 +252,12 @@ pub fn begin_run() -> Result<(), JsValue> {
         let mut state = cell.borrow_mut();
         if let Some(main) = state.as_mut() {
             // 新しい run が旧合成結果を無効化することを確定させ(基本設計書 3.3)、
-            // 行シードとの二重確保(最大 ~128 MB+64 MB)を避けてから実行状態を作る
+            // 行シードとの二重確保(最大 ~128 MB+64 MB)を避けてから実行状態を作る。
+            // 割当表は実行状態へ移管し(全ブロック未確定で開始)、
+            // 完了・キャンセル時に確定済み分が戻る
             main.composed = None;
+            main.tiles_added_since_match = false;
+            main.assigned = Vec::new();
             main.run = Some(pipeline::BatchRunState::new(
                 main.grid,
                 &main.features,
@@ -243,6 +266,88 @@ pub fn begin_run() -> Result<(), JsValue> {
         }
     });
     Ok(())
+}
+
+/// 差分再マッチを開始する(M6: 詳細設計書 4.4 差分再マッチ / 7.5 要求の合流)。
+///
+/// 現在の割当表とタイルプールの状態からモードを決定する:
+///
+/// - 割当表が空(初回生成・ブロックサイズ変更後)→ 全ブロックをマッチする
+///   ([`begin_run`] と同一。未確定ブロック = 全ブロック)
+/// - 未確定ブロックがある(タイル追加・削除後)→ 未確定ブロックのみマッチする
+/// - 全ブロック確定済みでタイルが追加された → 差し替え評価のみ行う
+///   (現割当より `improve_margin` 以上良い候補がある場合に差し替える)
+/// - 再マッチ不要(未確定なし・追加なし)→ 何もせず即時に完了する
+///
+/// 使用回数 usage は開始時・完了時に現割当表から再集計する(4.4:
+/// 「ペナルティの連続性を保つ」)。進捗・部分結果は run と同一の
+/// [`step_run`] 駆動で得られる(差分再マッチも P3 として計上)
+#[wasm_bindgen]
+pub fn begin_rematch() -> Result<(), JsValue> {
+    let has_main = MAIN_IMAGE.with(|cell| cell.borrow().is_some());
+    if !has_main {
+        return Err(js_error("main image is not set"));
+    }
+    let tile_count = TILE_POOL.with(|cell| cell.borrow().tile_count());
+    if tile_count == 0 {
+        return Err(js_error("tile pool is empty"));
+    }
+
+    MAIN_IMAGE.with(|cell| -> Result<(), JsValue> {
+        let mut state = cell.borrow_mut();
+        let Some(main) = state.as_mut() else {
+            return Err(js_error("main image is not set"));
+        };
+        // 差分モードの決定(詳細設計書 4.4)。
+        // タイル追加のフラグは開始した再マッチで消費する(要求の合流:
+        // 蓄積した変更は最新状態の 1 回の再開で吸収する。詳細設計書 7.5)
+        let total_blocks = main.grid.total_blocks;
+        let (mode, rematch_needed, assigned) = if main.assigned.is_empty() {
+            // 未確定 = 全ブロック: フルマッチと同一(usage は正規化する)
+            TILE_POOL.with(|pool| pool.borrow_mut().reset_usage());
+            (MatchMode::Full, true, vec![None; to_usize(total_blocks)])
+        } else if main.assigned.iter().any(Option::is_none) {
+            // 未確定ブロックのみマッチする(タイル追加・削除後)
+            (
+                MatchMode::FillUnmatched,
+                true,
+                std::mem::take(&mut main.assigned),
+            )
+        } else if main.tiles_added_since_match {
+            // 全ブロック確定済み + タイル追加: 差し替え評価のみ
+            (
+                MatchMode::SwapEvaluate,
+                true,
+                std::mem::take(&mut main.assigned),
+            )
+        } else {
+            // 再マッチ不要(タイル削除の対象ブロックなし等)。
+            // 即時に完了する実行状態を作り、呼び出し側の step ループを成立させる
+            (
+                MatchMode::FillUnmatched,
+                false,
+                std::mem::take(&mut main.assigned),
+            )
+        };
+        main.tiles_added_since_match = false;
+        if rematch_needed {
+            // 使用回数を現割当表から再集計する(4.4: ペナルティの連続性を保つ)
+            TILE_POOL.with(|pool| {
+                pool.borrow_mut().recount_usage(&main.assigned);
+            });
+        }
+        // 出力バッファのシードは現時点の合成結果(差分はこの上に上書き)。
+        // 合成結果が無い場合はメイン画像(全行が未合成相当)
+        let seed = main.composed.take().unwrap_or_else(|| main.rgba.clone());
+        main.run = Some(pipeline::BatchRunState::new_rematch(
+            main.grid,
+            &main.features,
+            assigned,
+            &seed,
+            mode,
+        ));
+        Ok(())
+    })
 }
 
 /// フォトモザイクの実行を 1 行バッチぶん進める(M5)。
@@ -274,10 +379,15 @@ pub fn step_run(now_ms: Option<f64>) -> Result<JsStepOutput, JsValue> {
             let result = step.result.map(JsResultBatch::from_batch);
             if done {
                 // 完了(またはキャンセル)で内部状態を確定する。
-                // キャンセル時は「現時点までの合成結果」(未完成行はメイン画像)を保持する
+                // キャンセル時は「現時点までの合成結果」(未完成行はシード)と
+                // 確定済みの割当表を保持する
                 if let Some(out) = run.take_output() {
                     main.composed = Some(out);
                 }
+                main.assigned = run.take_assignments();
+                // 使用回数を現割当表から再集計する(4.4: 差分再マッチ後に
+                // ペナルティの連続性を保つ。フルランでは再計上で同一値)
+                pool.recount_usage(&main.assigned);
                 main.run = None;
             }
             Ok(JsStepOutput {
@@ -305,6 +415,10 @@ pub fn cancel() {
                 if let Some(out) = run.take_output() {
                     main.composed = Some(out);
                 }
+                // 確定済みの割当表を保持する(M6: 差分再マッチは既存割当を基礎に
+                // 続行する。キャンセル分の使用回数も現割当表から再集計する)
+                main.assigned = run.take_assignments();
+                TILE_POOL.with(|pool| pool.borrow_mut().recount_usage(&main.assigned));
             }
         }
     });
@@ -370,6 +484,7 @@ pub fn set_config(json: String) -> Result<(), JsValue> {
         usage_penalty: f32_field("usage_penalty")?,
         neighbor_penalty: f32_field("neighbor_penalty")?,
         identical_de: f32_field("identical_de")?,
+        improve_margin: f32_field("improve_margin")?,
         usage_cap: u32_field("usage_cap")?,
         color_correct: f32_field("color_correct")?,
         row_batch: u32_field("row_batch")?,
@@ -393,6 +508,7 @@ fn config_to_json(config: &MosaicConfig) -> Result<String, JsValue> {
         ("usage_penalty", f64::from(config.usage_penalty)),
         ("neighbor_penalty", f64::from(config.neighbor_penalty)),
         ("identical_de", f64::from(config.identical_de)),
+        ("improve_margin", f64::from(config.improve_margin)),
         ("usage_cap", f64::from(config.usage_cap)),
         ("color_correct", f64::from(config.color_correct)),
         ("row_batch", f64::from(config.row_batch)),
@@ -627,6 +743,8 @@ impl JsTileInfo {
 /// - `feature_rgba`: 特徴量用サムネイル(32×32 固定。ホスト側でボックスフィルタ縮小済み)
 /// - `compose_rgba`: 合成用サムネイル(長辺 64 上限、アスペクト維持。P4 合成用に保持)
 /// - メモリガード超過時はエラーになり、プールは変更されない
+/// - メイン画像設定済みの場合は差し替え評価の対象として記録し、
+///   次の差分再マッチ([`begin_rematch`])で追随する(M6)
 #[wasm_bindgen]
 pub fn add_tile(
     id: u64,
@@ -637,20 +755,42 @@ pub fn add_tile(
 ) -> Result<JsTileInfo, JsValue> {
     TILE_POOL.with(|cell| {
         let mut pool = cell.borrow_mut();
-        pool.add_tile(id, &feature_rgba, &compose_rgba, compose_w, compose_h)
+        let info = pool
+            .add_tile(id, &feature_rgba, &compose_rgba, compose_w, compose_h)
             .map(JsTileInfo::from_feature)
-            .map_err(|err| js_error(&err.to_string()))
+            .map_err(|err| js_error(&err.to_string()))?;
+        MAIN_IMAGE.with(|cell| {
+            if let Some(main) = cell.borrow_mut().as_mut() {
+                // 現在の割当表の計算後に追加されたタイル(差し替え評価の対象。M6)
+                main.tiles_added_since_match = true;
+            }
+        });
+        Ok(info)
     })
 }
 
-/// プールからタイルを削除する(M3 ではマッチ結果が存在しないため再マッチ対象なし)
+/// プールからタイルを削除する。
+///
+/// 削除タイルが割当られていたブロックは未確定(None)に戻り、
+/// 次の差分再マッチ([`begin_rematch`])で現プールから再割当てされる
+/// (詳細設計書 4.4 差分再マッチ: タイル削除時)
 #[wasm_bindgen]
 pub fn remove_tile(id: u64) -> Result<(), JsValue> {
     TILE_POOL.with(|cell| {
         cell.borrow_mut()
             .remove_tile(id)
             .map_err(|err| js_error(&err.to_string()))
-    })
+    })?;
+    MAIN_IMAGE.with(|cell| {
+        if let Some(main) = cell.borrow_mut().as_mut() {
+            for slot in main.assigned.iter_mut() {
+                if *slot == Some(id) {
+                    *slot = None;
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 /// タイルプールを空にする(リセット操作に対応。合成用サムネイルを解放する)

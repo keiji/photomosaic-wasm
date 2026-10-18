@@ -25,6 +25,10 @@ pub struct MosaicConfig {
     pub neighbor_penalty: f32,
     /// 「視覚上同一」とみなす ΔE76 閾値。固定(2.0)
     pub identical_de: f32,
+    /// 差分再マッチ(タイル追加時)の差し替え判定マージン improve_margin。
+    /// 現割当の距離が候補の距離よりこの値以上悪いときだけ差し替える(ΔE 換算)。
+    /// 既定 1.0、範囲 0.5〜2.0
+    pub improve_margin: f32,
     /// 1 タイルの最大使用回数 usage_cap。既定 4 回、0 = 無制限
     pub usage_cap: u32,
     /// ブロック平均色へのトーン補正強度 α(color_correct)。既定 0.7、範囲 0〜1.0
@@ -58,6 +62,7 @@ impl Default for MosaicConfig {
             usage_penalty: 0.35,
             neighbor_penalty: 0.5,
             identical_de: 2.0,
+            improve_margin: 1.0,
             usage_cap: 4,
             color_correct: 0.7,
             row_batch: 8,
@@ -105,6 +110,13 @@ impl MosaicConfig {
                 requirement: "must be a positive number",
             });
         }
+        finite_in_range(
+            self.improve_margin,
+            0.5,
+            2.0,
+            "improve_margin",
+            "must be in 0.5..=2.0",
+        )?;
         if !(self.color_correct.is_finite() && (0.0..=1.0).contains(&self.color_correct)) {
             return Err(ConfigError {
                 field: "color_correct",
@@ -134,6 +146,7 @@ mod tests {
         assert_eq!(config.usage_penalty, 0.35);
         assert_eq!(config.neighbor_penalty, 0.5);
         assert_eq!(config.identical_de, 2.0);
+        assert_eq!(config.improve_margin, 1.0);
         assert_eq!(config.usage_cap, 4);
         assert_eq!(config.color_correct, 0.7);
         assert_eq!(config.row_batch, 8);
@@ -146,7 +159,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_out_of_range() {
-        let cases: [(MosaicConfig, &'static str); 6] = [
+        let cases: [(MosaicConfig, &'static str); 7] = [
             (
                 MosaicConfig {
                     w_c: 0.4,
@@ -189,6 +202,13 @@ mod tests {
                 },
                 "row_batch",
             ),
+            (
+                MosaicConfig {
+                    improve_margin: 0.4,
+                    ..MosaicConfig::default()
+                },
+                "improve_margin",
+            ),
         ];
         for (config, field) in cases {
             let err = config.validate().expect_err("must be rejected");
@@ -205,6 +225,7 @@ mod tests {
             usage_penalty: 1.0,
             neighbor_penalty: 0.0,
             identical_de: f32::MIN_POSITIVE,
+            improve_margin: 0.5,
             usage_cap: 0,
             color_correct: 1.0,
             row_batch: 32,
@@ -212,6 +233,7 @@ mod tests {
         assert_eq!(config.validate(), Ok(()));
         let config = MosaicConfig {
             w_c: 2.0,
+            improve_margin: 2.0,
             row_batch: 4,
             ..MosaicConfig::default()
         };

@@ -218,7 +218,8 @@ impl TilePool {
         Ok(feature)
     }
 
-    /// プールからタイルを削除する。割当中ブロックの再マッチ対象化は M4 以降で扱う
+    /// プールからタイルを削除する。該当タイルが割当られていたブロックの
+    /// 再マッチ(詳細設計書 4.4 差分再マッチ)は割当表を保持する呼び出し側が行う
     pub fn remove_tile(&mut self, id: u64) -> Result<(), TilePoolError> {
         match self.compose_thumbs.remove(&id) {
             Some((_, _, buf)) => {
@@ -265,6 +266,24 @@ impl TilePool {
         }
     }
 
+    /// 指定 ID の使用回数を 1 減算する(差分再マッチの差し替え評価用。M6)。
+    /// 存在しない ID・既に 0 の場合は no-op(飽和演算)
+    pub fn decrease_usage(&mut self, id: u64) {
+        if let Some(feature) = self.features.get_mut(&id) {
+            feature.usage = feature.usage.saturating_sub(1);
+        }
+    }
+
+    /// 現割当表から使用回数を再集計する(詳細設計書 4.4 差分再マッチ:
+    /// 「使用回数 usage は再マッチ後に現割当表から再集計する。ペナルティの
+    /// 連続性を保つ」)。全タイルをリセットしてから割当 1 件ごとに加算する
+    pub fn recount_usage(&mut self, assigned: &[Option<u64>]) {
+        self.reset_usage();
+        for tile_id in assigned.iter().flatten() {
+            self.bump_usage(*tile_id);
+        }
+    }
+
     /// 全タイルの使用回数が上限 `cap` に達しているか(詳細設計書 4.4)。
     /// `cap == 0` は無制限として常に `false` を返す。プール空も `false`(リセット不要)
     pub fn all_usage_reached(&self, cap: u32) -> bool {
@@ -302,6 +321,15 @@ impl TilePool {
     /// 検証を行うため、距離計算・usage 制御のみの単体テストで使用する)
     pub(crate) fn insert_feature_for_test(&mut self, feature: TileFeature) {
         self.features.insert(feature.id, feature);
+    }
+
+    /// テスト用に登録済みタイルの特徴量を上書きする
+    /// (add_tile はサムネイルから計算するため、距離計算の条件を固定したい
+    /// テストで使用する。合成用サムネイルは add_tile 登録分をそのまま使う)
+    pub(crate) fn overwrite_feature_for_test(&mut self, feature: TileFeature) {
+        if let Some(stored) = self.features.get_mut(&feature.id) {
+            *stored = feature;
+        }
     }
 }
 
@@ -499,6 +527,45 @@ mod tests {
         assert_eq!(pool.tile_count(), 0);
         assert_eq!(pool.total_compose_bytes(), 0);
         assert!(pool.compose_thumb(1).is_none());
+    }
+
+    #[test]
+    fn recount_usage_reflects_assignment_table() {
+        // 差分再マッチ(詳細設計書 4.4): 使用回数は現割当表から再集計する
+        let mut pool = TilePool::new();
+        pool.add_tile(1, &magenta_feature(), &compose_rgba(64, 64), 64, 64)
+            .expect("add should succeed");
+        pool.add_tile(2, &magenta_feature(), &compose_rgba(64, 64), 64, 64)
+            .expect("add should succeed");
+        pool.add_tile(3, &magenta_feature(), &compose_rgba(64, 64), 64, 64)
+            .expect("add should succeed");
+
+        // 事前状態: bump による usage(旧表と不一致な状態を作る)
+        pool.bump_usage(1);
+        pool.bump_usage(1);
+        pool.bump_usage(2);
+
+        // 割当表(1: 2 件、2: 0 件、3: 1 件、未確定 1 件)から再集計する
+        let assigned = [Some(1_u64), Some(3_u64), Some(1_u64), None];
+        pool.recount_usage(&assigned);
+        assert_eq!(pool.feature(1).expect("tile 1").usage, 2);
+        assert_eq!(pool.feature(2).expect("tile 2").usage, 0);
+        assert_eq!(pool.feature(3).expect("tile 3").usage, 1);
+    }
+
+    #[test]
+    fn decrease_usage_saturates_at_zero() {
+        let mut pool = TilePool::new();
+        pool.add_tile(1, &magenta_feature(), &compose_rgba(64, 64), 64, 64)
+            .expect("add should succeed");
+        // 0 からの減算は no-op(飽和)
+        pool.decrease_usage(1);
+        assert_eq!(pool.feature(1).expect("tile 1").usage, 0);
+        pool.bump_usage(1);
+        pool.decrease_usage(1);
+        assert_eq!(pool.feature(1).expect("tile 1").usage, 0);
+        // 存在しない ID も no-op
+        pool.decrease_usage(999);
     }
 
     #[test]

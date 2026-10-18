@@ -120,6 +120,84 @@ async function createWasmCore(): Promise<CoreBridge> {
     }
   };
 
+  /**
+   * begin で開始した行バッチ駆動ループ(M5 run / M6 rematch の共通駆動)。
+   * 各バッチで進捗(onProgress)と部分結果(onResult)を発火する。
+   * cancel() 呼び出しでバッチ境界の継続を止める
+   */
+  const driveRun = (begin: () => void): Promise<void> => {
+    begin();
+    const handle = { canceled: false };
+    // 同一 run のハンドルのみ解除する(先の run の後始末が後発の
+    // run のハンドルを誤って消すのを防ぐ: 要求の合流の連続操作)
+    activeRun = handle;
+    return new Promise<void>((resolve, reject) => {
+      const drive = (): void => {
+        if (handle.canceled) {
+          if (activeRun === handle) {
+            activeRun = null;
+          }
+          resolve();
+          return;
+        }
+        let out: Awaited<ReturnType<typeof wasm.step_run>>;
+        try {
+          out = wasm.step_run(performance.now());
+        } catch (err) {
+          if (activeRun === handle) {
+            activeRun = null;
+          }
+          reject(err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
+        try {
+          const progress = out.progress;
+          if (progress) {
+            emit({
+              phaseCode: progress.phase_code,
+              phaseRatio: progress.phase_ratio,
+              overallRatio: progress.overall_ratio,
+              assignedBlocks: progress.assigned_blocks,
+              totalBlocks: progress.total_blocks,
+            });
+            progress.free();
+          }
+          const result = out.result;
+          if (result) {
+            emitResult({
+              blockRowBegin: result.row_begin,
+              blockRowEnd: result.row_end,
+              blockSize: result.block_size,
+              width: result.width,
+              // rgba は wasm-bindgen がコピーした新規バッファ。
+              // 部分描画で転写するため参照先はここでは保持しない
+              rgba: result.rgba,
+            });
+            result.free();
+          }
+          const done = out.done;
+          out.free();
+          if (done) {
+            if (activeRun === handle) {
+              activeRun = null;
+            }
+            resolve();
+            return;
+          }
+        } catch (err) {
+          if (activeRun === handle) {
+            activeRun = null;
+          }
+          reject(err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
+        // バッチ境界で JS へ制御を返す(詳細設計書 8.1)
+        scheduleNextBatch(drive);
+      };
+      drive();
+    });
+  };
+
   return {
     async getVersion(): Promise<string> {
       return wasm.get_version();
@@ -184,66 +262,14 @@ async function createWasmCore(): Promise<CoreBridge> {
       // 行バッチ駆動ループ(M5): 1 バッチごとに UI に制御を返し、
       // 進捗(onProgress)と部分結果(onResult)を届ける。
       // cancel() 呼び出しでバッチ境界の継続を止める
-      wasm.begin_run();
-      const handle = { canceled: false };
-      activeRun = handle;
-      return new Promise<void>((resolve, reject) => {
-        const drive = (): void => {
-          if (handle.canceled) {
-            activeRun = null;
-            resolve();
-            return;
-          }
-          let out: Awaited<ReturnType<typeof wasm.step_run>>;
-          try {
-            out = wasm.step_run(performance.now());
-          } catch (err) {
-            activeRun = null;
-            reject(err instanceof Error ? err : new Error(String(err)));
-            return;
-          }
-          try {
-            const progress = out.progress;
-            if (progress) {
-              emit({
-                phaseCode: progress.phase_code,
-                phaseRatio: progress.phase_ratio,
-                overallRatio: progress.overall_ratio,
-                assignedBlocks: progress.assigned_blocks,
-                totalBlocks: progress.total_blocks,
-              });
-              progress.free();
-            }
-            const result = out.result;
-            if (result) {
-              emitResult({
-                blockRowBegin: result.row_begin,
-                blockRowEnd: result.row_end,
-                blockSize: result.block_size,
-                width: result.width,
-                // rgba は wasm-bindgen がコピーした新規バッファ。
-                // 部分描画で転写するため参照先はここでは保持しない
-                rgba: result.rgba,
-              });
-              result.free();
-            }
-            const done = out.done;
-            out.free();
-            if (done) {
-              activeRun = null;
-              resolve();
-              return;
-            }
-          } catch (err) {
-            activeRun = null;
-            reject(err instanceof Error ? err : new Error(String(err)));
-            return;
-          }
-          // バッチ境界で JS へ制御を返す(詳細設計書 8.1)
-          scheduleNextBatch(drive);
-        };
-        drive();
-      });
+      return driveRun(() => wasm.begin_run());
+    },
+
+    async rematch(): Promise<void> {
+      // 差分再マッチ(M6: 詳細設計書 4.4): 未確定ブロックのマッチ・
+      // 差し替え評価(improve_margin)を行い、再マッチした行のみ再合成する。
+      // 駆動と進捗・部分結果の発火は run と共通(driveRun)
+      return driveRun(() => wasm.begin_rematch());
     },
 
     cancel(): void {

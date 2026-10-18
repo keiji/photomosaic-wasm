@@ -19,8 +19,9 @@ use crate::tile::{TileFeature, TilePool};
 /// 行範囲 `[row_begin, row_end)` を合成済みバッファへ描画する(P4)。
 ///
 /// - `out`: 画像全体サイズ(width * height * 4)の RGBA バッファ。
-///   書き込みは指定行範囲のみ(M5 の部分描画に再利用する)
-/// - `assignments`: ブロック番号 → タイル ID(P3 のマッチ結果)
+///   書き込みは指定行範囲のみ(M5 の部分描画・M6 の差分再合成に再利用する)
+/// - `assignments`: 全ブロックの割当表(None = 未確定ブロック)。未確定
+///   ブロックは描画せずスキップする(M6 の差分再合成では既存の出力値を保持)
 /// - タイルがプールに存在しない場合(実行中の削除など)はそのブロックを
 ///   描画せずスキップする(出力バッファの既存値を保持)
 // M5 の部分描画(行範囲 + プログレスコールバック)を損ねないよう、
@@ -30,7 +31,7 @@ pub fn compose_rows(
     out: &mut [u8],
     grid: &GridInfo,
     features: &[BlockFeature],
-    assignments: &[u64],
+    assignments: &[Option<u64>],
     pool: &TilePool,
     config: &MosaicConfig,
     row_begin: u32,
@@ -59,7 +60,7 @@ pub fn compose_rows(
         for col in 0..grid.cols {
             let block_index =
                 usize::try_from(row * grid.cols + col).expect("block index fits usize");
-            let Some(tile_id) = assignments.get(block_index).copied() else {
+            let Some(tile_id) = assignments.get(block_index).copied().flatten() else {
                 continue;
             };
             let Some(tile) = pool.feature(tile_id) else {
@@ -74,7 +75,7 @@ pub fn compose_rows(
 pub fn compose(
     grid: &GridInfo,
     features: &[BlockFeature],
-    assignments: &[u64],
+    assignments: &[Option<u64>],
     pool: &TilePool,
     config: &MosaicConfig,
 ) -> Vec<u8> {
@@ -263,7 +264,7 @@ mod tests {
         // 全ピクセルが描画され、出力のアルファが 255 になること(白背景仕様)
         let (grid, features) = uniform_grid(24, 24, 24, [50.0, 0.0, 0.0]);
         let pool = pool_with_flat_tile(1, [200, 100, 50]);
-        let assignments = vec![1_u64; grid.total_blocks as usize];
+        let assignments = vec![Some(1_u64); grid.total_blocks as usize];
         let out = compose(
             &grid,
             &features,
@@ -280,7 +281,7 @@ mod tests {
         // α=0: 色補正なし(タイル原色のパッチワーク)
         let (grid, features) = uniform_grid(24, 24, 24, [90.0, -20.0, 30.0]);
         let pool = pool_with_flat_tile(1, [180, 60, 30]);
-        let assignments = vec![1_u64; grid.total_blocks as usize];
+        let assignments = vec![Some(1_u64); grid.total_blocks as usize];
         let config = MosaicConfig {
             color_correct: 0.0,
             ..MosaicConfig::default()
@@ -298,7 +299,7 @@ mod tests {
         // α=1: 出力の線形 RGB 平均がブロック平均と一致する(トーンの完全一致)
         let (grid, features) = uniform_grid(24, 24, 24, [90.0, -20.0, 30.0]);
         let pool = pool_with_flat_tile(1, [180, 60, 30]);
-        let assignments = vec![1_u64; grid.total_blocks as usize];
+        let assignments = vec![Some(1_u64); grid.total_blocks as usize];
         let config = MosaicConfig {
             color_correct: 1.0,
             ..MosaicConfig::default()
@@ -332,7 +333,7 @@ mod tests {
         // 30x30 / block 24 → 右下が半端(6x6)。クリップ描画で全体が覆われること
         let (grid, features) = uniform_grid(30, 30, 24, [50.0, 0.0, 0.0]);
         let pool = pool_with_flat_tile(1, [100, 100, 100]);
-        let assignments = vec![1_u64; grid.total_blocks as usize];
+        let assignments = vec![Some(1_u64); grid.total_blocks as usize];
         let config = MosaicConfig {
             color_correct: 0.0,
             ..MosaicConfig::default()
@@ -364,7 +365,7 @@ mod tests {
         let feature_arg = thumb_feature_buffer([128, 128, 128]);
         pool.add_tile(1, &feature_arg, &compose_arg, 64, 64)
             .expect("tile registration should succeed");
-        let assignments = vec![1_u64; grid.total_blocks as usize];
+        let assignments = vec![Some(1_u64); grid.total_blocks as usize];
         let config = MosaicConfig {
             color_correct: 0.0,
             ..MosaicConfig::default()
@@ -396,7 +397,7 @@ mod tests {
             ..MosaicConfig::default()
         };
         let mut out = vec![7_u8; 24 * 48 * 4];
-        let assignments = vec![1_u64; grid.total_blocks as usize];
+        let assignments = vec![Some(1_u64); grid.total_blocks as usize];
         compose_rows(
             &mut out,
             &grid,
@@ -418,12 +419,12 @@ mod tests {
 
     #[test]
     fn missing_tile_is_skipped() {
-        // 割当に存在しないタイル ID がある場合、そのブロックのみ未描画
-        // (48x24 / block 24 → 2x1 ブロック。ブロック 0 を無効 ID にする)
+        // 未確定ブロック(None)の割当は描画せずスキップし、出力の既存値を保持する
+        // (48x24 / block 24 → 2x1 ブロック。ブロック 0 を未確定にする)
         let (grid, features) = uniform_grid(48, 24, 24, [50.0, 0.0, 0.0]);
         let pool = pool_with_flat_tile(1, [100, 100, 100]);
-        let mut assignments = vec![1_u64; grid.total_blocks as usize];
-        assignments[0] = 99; // 存在しないタイル
+        let mut assignments = vec![Some(1_u64); grid.total_blocks as usize];
+        assignments[0] = None; // 未確定ブロック
         let mut out = vec![7_u8; 48 * 24 * 4];
         compose_rows(
             &mut out,
@@ -505,7 +506,7 @@ mod tests {
         let config = MosaicConfig::default();
         pool.reset_usage();
         let matches = crate::match_engine::match_blocks(&features, grid.cols, &mut pool, &config);
-        let assignments: Vec<u64> = matches.iter().map(|m| m.tile_id).collect();
+        let assignments: Vec<Option<u64>> = matches.iter().map(|m| Some(m.tile_id)).collect();
         let out = compose(&grid, &features, &assignments, &pool, &config);
         assert_eq!(out.len(), 32 * 32 * 4);
         assert_eq!(

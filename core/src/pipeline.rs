@@ -1,7 +1,10 @@
-//! フェーズ制御・オーケストレーション(詳細設計書 4.1 / 7 章 / 8.1)。
+//! フェーズ制御・オーケストレーション(詳細設計書 4.1 / 4.4 / 7 章 / 8.1)。
 //!
 //! M5: P3(マッチング)と P4(合成)を行バッチ単位で進める
 //! [`BatchRunState`] を提供する。
+//! M6: 差分再マッチ(未確定ブロックのマッチ・差し替え評価)を
+//! 同一の実装で扱う。差分再マッチでは再マッチしたブロック行のみを
+//! 再合成し、出力バッファは現時点の合成結果をシードとして再利用する。
 //!
 //! - `step()` の 1 呼び出しが 1 行バッチ(row_batch 行)ぶんの処理に対応し、
 //!   進捗イベント([`ProgressEvent`])と部分結果([`ResultBatch`])を返す
@@ -13,7 +16,9 @@
 use crate::compose;
 use crate::config::MosaicConfig;
 use crate::grid::{BlockFeature, GridInfo};
-use crate::match_engine::{match_block_range, MatchResult};
+use crate::match_engine::{
+    assignments_to_matches, evaluate_swap_range, match_unmatched_range, MatchResult,
+};
 use crate::progress::{Phase, PhasePlan, ProgressEvent, ProgressThrottle};
 use crate::tile::TilePool;
 
@@ -56,57 +61,145 @@ pub struct Step {
     pub done: bool,
 }
 
+/// マッチングの実行モード(詳細設計書 4.4 差分再マッチ)。
+///
+/// P3 の走査は常に「ブロック番号昇順 × タイル ID 昇順」で行い、モードは
+/// 各ブロックへの働きかけ(全マッチ / 未確定のみ / 差し替え評価)だけを変える。
+/// これによりフルランと差分再マッチが単一の実装を共有する(単一の情報源)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchMode {
+    /// 全ブロックをマッチする(初回生成・ブロックサイズ変更後の再生成)
+    Full,
+    /// 未確定(None)ブロックのみマッチする(タイル追加・削除後の差分再マッチ)。
+    /// タイル追加時は「未確定ブロックを優先的にマッチする」(詳細設計書 4.4)
+    FillUnmatched,
+    /// 差し替え評価のみ行う(全ブロック確定済みでタイルが追加された場合の
+    /// 差分再マッチ)。現割当より improve_margin 以上良い候補がある場合のみ
+    /// 差し替える(詳細設計書 4.4)
+    SwapEvaluate,
+}
+
 /// 進行中のフェーズ(run の実行順序は P3 → P4 に固定)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunPhase {
-    /// P3 マッチング(matched_rows 行目以降が未確定)
+    /// P3 マッチング(ブロック位置 match_next_block 以降が未走査)
     Matching,
-    /// P4 合成(compose_next_row 行目以降が未合成)
+    /// P4 合成(再合成対象行 dirty のうち compose_cursor 以降が未合成)
     Composing,
 }
 
-/// 行バッチで駆動する実行状態(M5: 詳細設計書 4.4 手順 / 7.4 / 8.1)。
+/// 行バッチで駆動する実行状態(詳細設計書 4.4 手順 / 7.4 / 8.1)。
 ///
 /// - 内部に P1 出力(グリッド・ブロック特徴量)の実行用スナップショットを持つ
 ///   (run 中のホスト側変更の影響を受けない)
-/// - 出力バッファ `out` の初期値はメイン画像のコピー(行シード)。
-///   完了時には全行が合成で上書きされ、キャンセル時には「現時点までの
-///   合成結果」として取り出される
+/// - 割当表 `assigned` は全ブロック分の `Option<u64>`(None = 未確定)。
+///   フルランは全要素 None で開始し、完了・キャンセル時に呼び出し側へ返す
+///   (M6: 差分再マッチが既存割当を基礎に動作するため)
+/// - 出力バッファ `out` の初期値はシード(フルランはメイン画像、
+///   差分再マッチは現時点の合成結果)。完了時には再合成対象行が
+///   合成で上書きされ、キャンセル時には「現時点までの合成結果」として取り出される
 pub struct BatchRunState {
     grid: GridInfo,
     /// ブロック特徴量の実行用スナップショット
     features: Vec<BlockFeature>,
-    /// 確定済み割当(タイル ID、行優先)。長さ = マッチ済みブロック数
-    assigned: Vec<u64>,
-    /// P3 進捗: マッチ済み行数
-    matched_rows: u32,
-    /// P4 進捗: 合成済み行数
-    compose_next_row: u32,
+    /// 割当表(全ブロック分。None = 未確定)
+    assigned: Vec<Option<u64>>,
+    /// マッチングの実行モード
+    mode: MatchMode,
+    /// P3 進捗: 次に走査するブロック位置
+    match_next_block: usize,
+    /// 確定済み(割当あり)ブロック数(進捗イベントの assigned_blocks。
+    /// 差分再マッチでは「全体ブロック数に対して計上」する: 詳細設計書 4.4)
+    assigned_count: u32,
+    /// 再マッチ・差し替えが発生したブロック行のフラグ(P4 の合成範囲)
+    dirty_block_rows: Vec<bool>,
+    /// 再合成対象行(昇順)。P3 完了時に確定する
+    compose_dirty_rows: Vec<u32>,
+    /// P4 進捗: 合成済み dirty 行数
+    composed_dirty_rows: u32,
+    /// P4 進捗: 次に合成する compose_dirty_rows の位置
+    compose_cursor: usize,
     phase: RunPhase,
     /// 全体進捗の配分。run に含まれるのは P3 + P4 のみ(P1/P2 は先行完了のため、
     /// 詳細設計書 7.1 の「スキップされたフェーズの再配分」で正規化する)
     plan: PhasePlan,
     throttle: ProgressThrottle,
-    /// 合成結果バッファ(メイン画像コピーで初期化。完成時 / キャンセル時に取り出す)
+    /// 合成結果バッファ(シードで初期化。完成時 / キャンセル時に取り出す)
     out: Vec<u8>,
     canceled: bool,
     done: bool,
 }
 
 impl BatchRunState {
-    /// 実行状態を生成する(P3 開始前)。
+    /// 実行状態を生成する(P3 開始前。フルマッチモード)。
     ///
     /// - `seed_rgba`: メイン画像の RGBA(出力バッファの行シード)。
     ///   長さは `grid.width * grid.height * 4` と一致させる
     pub fn new(grid: GridInfo, block_features: &[BlockFeature], seed_rgba: &[u8]) -> Self {
+        let total = to_usize(grid.total_blocks);
+        Self::with_mode(
+            grid,
+            block_features,
+            vec![None; total],
+            seed_rgba,
+            MatchMode::Full,
+        )
+    }
+
+    /// 差分再マッチの実行状態を生成する(M6: 詳細設計書 4.4 差分再マッチ)。
+    ///
+    /// - `assigned`: 現在の割当表(全ブロック分。None = 未確定)。
+    ///   本状態が保持し、完了・キャンセル時に [`take_assignments`] で返す
+    /// - `seed_rgba`: 出力バッファのシード(現時点の合成結果。
+    ///   再合成対象行のみが上書きされる。全要素 None のフル相当では
+    ///   メイン画像を渡す)
+    /// - `mode`: [`MatchMode::FillUnmatched`] / [`MatchMode::SwapEvaluate`] /
+    ///   [`MatchMode::Full`](割当表が空で全ブロック未確定の場合。[`BatchRunState::new`]
+    ///   と同一の挙動だがシードが合成結果を参照しうる点が異なる)
+    ///
+    /// [`take_assignments`]: BatchRunState::take_assignments
+    pub fn new_rematch(
+        grid: GridInfo,
+        block_features: &[BlockFeature],
+        assigned: Vec<Option<u64>>,
+        seed_rgba: &[u8],
+        mode: MatchMode,
+    ) -> Self {
+        Self::with_mode(grid, block_features, assigned, seed_rgba, mode)
+    }
+
+    /// 共通の構築処理(モード指定)
+    fn with_mode(
+        grid: GridInfo,
+        block_features: &[BlockFeature],
+        assigned: Vec<Option<u64>>,
+        seed_rgba: &[u8],
+        mode: MatchMode,
+    ) -> Self {
         let size = to_usize(grid.width) * to_usize(grid.height) * 4;
         assert_eq!(seed_rgba.len(), size, "seed rgba buffer length mismatch");
+        assert_eq!(
+            assigned.len(),
+            to_usize(grid.total_blocks),
+            "assignment table length mismatch"
+        );
+        let assigned_count = assigned.iter().filter(|slot| slot.is_some()).count() as u32;
+        // フルランは全ブロック行が再合成対象。差分再マッチはマッチ時に確定する
+        let mut dirty_block_rows = vec![false; to_usize(grid.rows)];
+        if mode == MatchMode::Full {
+            dirty_block_rows.iter_mut().for_each(|dirty| *dirty = true);
+        }
         BatchRunState {
             grid,
             features: block_features.to_vec(),
-            assigned: Vec::with_capacity(to_usize(grid.total_blocks)),
-            matched_rows: 0,
-            compose_next_row: 0,
+            assigned,
+            mode,
+            match_next_block: 0,
+            assigned_count,
+            dirty_block_rows,
+            compose_dirty_rows: Vec::new(),
+            composed_dirty_rows: 0,
+            compose_cursor: 0,
             phase: RunPhase::Matching,
             plan: PhasePlan::new(vec![Phase::Match, Phase::Compose]),
             throttle: ProgressThrottle::new(),
@@ -134,6 +227,12 @@ impl BatchRunState {
         } else {
             None
         }
+    }
+
+    /// 現在の割当表を取り出す(完了 / キャンセル後。M6: 差分再マッチの基礎)。
+    /// 取り出し後は空になる。キャンセル時は確定済みの分のみが入る
+    pub fn take_assignments(&mut self) -> Vec<Option<u64>> {
+        std::mem::take(&mut self.assigned)
     }
 
     /// キャンセル要求の記録(詳細設計書 7.5)。
@@ -188,41 +287,71 @@ impl BatchRunState {
                 done: true,
             };
         }
-        let rows = self.grid.rows;
         let cols = self.grid.cols;
-        let batch = config.row_batch.max(1);
-        let begin = self.matched_rows;
-        let end = begin.saturating_add(batch).min(rows);
-        let block_begin = begin.saturating_mul(cols) as usize;
-        let block_end = end.saturating_mul(cols) as usize;
-        // 確定済み割当は assigned で保持し、隣接参照(直上・直左)に利用する
-        match_block_range(
-            &self.features,
-            cols,
-            pool,
-            config,
-            &mut self.assigned,
-            block_begin,
-            block_end,
-        );
-        debug_assert_eq!(
-            self.assigned.len(),
-            block_end,
-            "assigned covers matched blocks"
-        );
-        self.matched_rows = end;
+        let total = to_usize(self.grid.total_blocks);
+        let batch_blocks = to_usize(config.row_batch.max(1)) * to_usize(cols);
+        let block_begin = self.match_next_block.min(total);
+        let block_end = (block_begin + batch_blocks).min(total);
 
+        match self.mode {
+            MatchMode::Full | MatchMode::FillUnmatched => {
+                let matched = match_unmatched_range(
+                    &self.features,
+                    cols,
+                    pool,
+                    config,
+                    &mut self.assigned,
+                    block_begin,
+                    block_end,
+                );
+                // 確定済みブロック数は本バッチで新たにマッチした分だけ増える
+                // (差分再マッチでは既存割当を含む範囲を走査するため、
+                // 範囲全体の再計上はしない)
+                self.assigned_count += matched.len() as u32;
+                for position in matched {
+                    let row = to_usize(position / cols);
+                    self.dirty_block_rows[row] = true;
+                }
+            }
+            MatchMode::SwapEvaluate => {
+                let swapped = evaluate_swap_range(
+                    &self.features,
+                    cols,
+                    pool,
+                    config,
+                    &mut self.assigned,
+                    block_begin,
+                    block_end,
+                );
+                for position in swapped {
+                    let row = to_usize(position / cols);
+                    self.dirty_block_rows[row] = true;
+                }
+            }
+        }
+        self.match_next_block = block_end;
+
+        // P3 の phase_ratio は「マッチ済みブロック数 / total_blocks」(詳細設計書 7.1)。
+        // 差分再マッチでも assigned_blocks を全体ブロック数に対して計上する(4.4)
         let progress = self.emit(
             Phase::Match,
-            end as f32 / rows as f32,
-            self.matched_rows.saturating_mul(cols),
+            self.assigned_count as f32 / self.grid.total_blocks as f32,
+            self.assigned_count,
             now_ms,
             false,
         );
-        if end >= rows {
-            // P3 完了 → P4 合成へ移行
+        if block_end >= total {
+            // P3 完了 → P4 合成へ移行(再合成対象行を確定させる)
+            self.compose_dirty_rows = self
+                .dirty_block_rows
+                .iter()
+                .enumerate()
+                .filter(|(_, dirty)| **dirty)
+                .map(|(row, _)| u32::try_from(row).expect("row fits u32"))
+                .collect();
+            self.composed_dirty_rows = 0;
+            self.compose_cursor = 0;
             self.phase = RunPhase::Composing;
-            self.compose_next_row = 0;
         }
         Step {
             progress,
@@ -231,17 +360,29 @@ impl BatchRunState {
         }
     }
 
-    /// P4 合成の 1 行バッチ。行範囲を合成して部分結果(RGBA)を返す
+    /// P4 合成の 1 行バッチ。再合成対象行(dirty 行)を合成して部分結果を返す
     fn step_compose(
         &mut self,
         pool: &TilePool,
         config: &MosaicConfig,
         now_ms: Option<f64>,
     ) -> Step {
-        let rows = self.grid.rows;
         let batch = config.row_batch.max(1);
-        let begin = self.compose_next_row;
-        let end = begin.saturating_add(batch).min(rows);
+        let total_dirty = self.compose_dirty_rows.len();
+        // 再合成対象行から次の連続区間(最大 row_batch 行)を取り出す。
+        // フルラン(dirty = 全行)では row_batch 行ずつの連続区間になり、
+        // M4/M5 と同一の部分結果の粒度になる
+        let Some((begin, end)) = self.next_dirty_range(batch) else {
+            // 合成対象なし(差分再マッチで再マッチ・差し替えが発生しなかった)。
+            // 既存の合成結果を保持したまま完了する
+            self.done = true;
+            let progress = self.emit(Phase::Compose, 1.0, self.grid.total_blocks, now_ms, true);
+            return Step {
+                progress,
+                result: None,
+                done: true,
+            };
+        };
         compose::compose_rows(
             &mut self.out,
             &self.grid,
@@ -252,7 +393,7 @@ impl BatchRunState {
             begin,
             end,
         );
-        self.compose_next_row = end;
+        self.composed_dirty_rows += end - begin;
 
         // 部分結果のスライスは画素行単位(1 ブロック行 = block_size 画素行)。
         // 下端の半端ブロック行は画像端でクリップする(out 長は height 基準)
@@ -268,12 +409,12 @@ impl BatchRunState {
             rgba: self.out[slice_begin..slice_end].to_vec(),
         });
 
-        let final_step = end >= rows;
+        let final_step = self.compose_cursor >= total_dirty;
         // 合成中もブロック進捗バーは 100% を維持する(基本設計書 2.3)。
         // assigned_blocks には全ブロック数を通知する
         let progress = self.emit(
             Phase::Compose,
-            end as f32 / rows as f32,
+            self.composed_dirty_rows as f32 / total_dirty as f32,
             self.grid.total_blocks,
             now_ms,
             final_step,
@@ -286,6 +427,27 @@ impl BatchRunState {
             result,
             done: self.done,
         }
+    }
+
+    /// 再合成対象行から次の連続区間 `[begin, end)` を取り出す
+    /// (最大 `max_rows` 行。昇順の dirty 行リストの先頭から消費する)
+    fn next_dirty_range(&mut self, max_rows: u32) -> Option<(u32, u32)> {
+        let start = *self.compose_dirty_rows.get(self.compose_cursor)?;
+        let max_rows = to_usize(max_rows);
+        let mut end = start + 1;
+        let mut taken = 1_usize;
+        self.compose_cursor += 1;
+        while self.compose_cursor < self.compose_dirty_rows.len() && taken < max_rows {
+            let next = self.compose_dirty_rows[self.compose_cursor];
+            if next == end {
+                end += 1;
+                taken += 1;
+                self.compose_cursor += 1;
+            } else {
+                break;
+            }
+        }
+        Some((start, end))
     }
 
     /// 進捗イベントの発火判定(詳細設計書 7.2)。
@@ -320,24 +482,12 @@ impl BatchRunState {
     }
 }
 
-/// 確定済み割当(タイル ID 行優先)からマッチ結果を組み立てる
-fn to_matches(assigned: &[u64]) -> Vec<MatchResult> {
-    assigned
-        .iter()
-        .enumerate()
-        .map(|(i, &tile_id)| MatchResult {
-            block_index: i as u32,
-            tile_id,
-        })
-        .collect()
-}
-
 /// u32 → usize の変換(wasm32 でも 4 GB 未満の寸法を安全に扱う)
 fn to_usize(value: u32) -> usize {
     usize::try_from(value).expect("value fits usize")
 }
 
-/// P3 + P4 を一括実行する(同期 API)。
+/// P3 + P4 を一括実行する(同期 API・フルマッチモード)。
 ///
 /// 内部では [`BatchRunState`] の行バッチ実行を完走させ、一括実行経路と
 /// バッチ実行経路が同一の結果になることを保証する(単一の情報源)。
@@ -371,7 +521,7 @@ pub fn run_phases(
     let rgba = state
         .take_output()
         .expect("completed run must produce output");
-    let matches = to_matches(&state.assigned);
+    let matches = assignments_to_matches(&state.take_assignments());
     Ok(RunOutput { matches, rgba })
 }
 
@@ -519,6 +669,42 @@ mod tests {
         assert!(
             elapsed.as_millis() < 2_000,
             "full pipeline took {elapsed:?}, budget is 2,000ms"
+        );
+    }
+
+    #[test]
+    fn rematch_block_size_change_budget() {
+        // 完了条件(handoff/04 M6): ブロックサイズ変更時の再生成は
+        // 1.5 秒以内(詳細設計書 10 章。P2 スキップの効果)。
+        // S-small 相当(1600x1200 / 50 枚)でフル再マッチ(P1+P3+P4、P2 スキップ)
+        // を計測し、緩い上限でリグレッション検知とする
+        let rgba = test_image(1600, 1200);
+        let mut pool = setup_pool(50);
+        let config = MosaicConfig::default();
+
+        // 初回生成(24px)
+        let grid = crate::grid::compute_grid_info(1600, 1200, 24);
+        let features = crate::grid::compute_block_features(&rgba, 1600, 1200, 24);
+        let output = run_phases(&grid, &features, &mut pool, &config, &rgba)
+            .expect("initial run should succeed");
+
+        // ブロックサイズ変更(32px): P1 再計算 + P3/P4 再生成(P2 スキップ)
+        let start = std::time::Instant::now();
+        let grid = crate::grid::compute_grid_info(1600, 1200, 32);
+        let features = crate::grid::compute_block_features(&rgba, 1600, 1200, 32);
+        let regenerated = run_phases(&grid, &features, &mut pool, &config, &rgba)
+            .expect("regeneration should succeed");
+        let elapsed = start.elapsed();
+        assert_eq!(regenerated.rgba.len(), 1600 * 1200 * 4);
+        assert_ne!(
+            regenerated.matches, output.matches,
+            "grid change re-matches all"
+        );
+        // 詳細設計書 10 章: ブロックサイズ変更時の再生成 1.5 秒以内。
+        // S-small(12MP の約 1/8)での実測に対し緩い上限(1 秒)で検知する
+        assert!(
+            elapsed.as_millis() < 1_000,
+            "block size regeneration took {elapsed:?}, budget is 1,000ms"
         );
     }
 
@@ -798,5 +984,360 @@ mod tests {
             let _ = BatchRunState::new(f.grid, &f.features, &short);
         });
         assert!(result.is_err(), "seed length mismatch must panic");
+    }
+
+    /// M6 差分再マッチ: キャンセルで生じた未確定ブロックのみをマッチする
+    /// (FillUnmatched。詳細設計書 4.4「未確定ブロックを優先的にマッチする」)
+    #[test]
+    fn rematch_fill_unmatched_completes_partial_run() {
+        let f = TestImage::new(96, 384, 24); // cols=4, rows=16, 64 ブロック
+        let mut pool = setup_pool(4);
+
+        // フルランを 1 行バッチ(8 行 = 32 ブロック)だけ進めて中断する
+        let mut state = BatchRunState::new(f.grid, &f.features, &f.rgba);
+        let s = state.step(&mut pool, &f.config, Some(0.0));
+        assert!(!s.done);
+        assert_eq!(s.result, None, "match phase emits no result batch");
+        state.cancel();
+        let partial_assigned = state.take_assignments();
+        let partial_out = state.take_output().expect("canceled run keeps output");
+        assert_eq!(
+            partial_assigned
+                .iter()
+                .filter(|slot| slot.is_some())
+                .count(),
+            32,
+            "one batch of 8 rows x 4 cols is settled"
+        );
+
+        // タイルを追加して差分再マッチ(未確定のみ)。シードは現時点の合成結果
+        let mut pool = setup_pool(4);
+        let mut feature_arg = vec![0_u8; FEATURE_THUMB as usize * FEATURE_THUMB as usize * 4];
+        let size = 64_usize;
+        let mut compose_arg = vec![0_u8; size * size * 4];
+        for (i, pixel) in feature_arg.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            pixel[0] = ((i * 13) % 256) as u8;
+            pixel[1] = ((i * 17 + 5) % 256) as u8;
+            pixel[2] = ((i * 19 + 200) % 256) as u8;
+            pixel[3] = 255;
+        }
+        for (i, pixel) in compose_arg.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            pixel[0] = ((i * 11 + 5) % 256) as u8;
+            pixel[1] = ((i * 23 + 5) % 256) as u8;
+            pixel[2] = ((i * 29 + 5) % 256) as u8;
+            pixel[3] = 255;
+        }
+        pool.add_tile(5, &feature_arg, &compose_arg, 64, 64)
+            .expect("tile registration should succeed");
+        // 使用回数を現割当表から再集計する(4.4: ペナルティの連続性を保つ)
+        pool.recount_usage(&partial_assigned);
+
+        let mut rematch = BatchRunState::new_rematch(
+            f.grid,
+            &f.features,
+            partial_assigned,
+            &partial_out,
+            MatchMode::FillUnmatched,
+        );
+        let mut now = 0.0_f64;
+        let mut batches = Vec::new();
+        let mut events = Vec::new();
+        while !rematch.is_done() {
+            let s = rematch.step(&mut pool, &f.config, Some(now));
+            now += 16.0;
+            if let Some(batch) = s.result {
+                batches.push(batch);
+            }
+            if let Some(event) = s.progress {
+                events.push(event);
+            }
+            if s.done {
+                break;
+            }
+        }
+        assert!(rematch.is_done());
+
+        // 未確定ブロックがすべて確定する
+        let final_assigned = rematch.take_assignments();
+        assert!(final_assigned.iter().all(Option::is_some));
+        assert_eq!(final_assigned.len(), 64);
+
+        // 再合成は未確定ブロックを含む行(8..16 行)のみ。既存行は保持される
+        assert!(
+            !batches.is_empty(),
+            "dirty rows must produce result batches"
+        );
+        for batch in &batches {
+            assert!(
+                batch.row_begin >= 8,
+                "only unmatched rows (8..16) are recomposed, got {}..{}",
+                batch.row_begin,
+                batch.row_end
+            );
+        }
+        let composed = rematch.take_output().expect("completed rematch output");
+        let unchanged_bytes = 8 * to_usize(f.grid.block_size) * to_usize(f.grid.width) * 4; // 8 ブロック行分
+        assert_eq!(
+            &composed[..unchanged_bytes],
+            &partial_out[..unchanged_bytes],
+            "already composed rows must be kept"
+        );
+
+        // 進捗: assigned_blocks は全体ブロック数に対して単調増加し、最後は 100%
+        let mut prev = 32_u32;
+        for event in &events {
+            assert!(event.assigned_blocks >= prev);
+            prev = event.assigned_blocks;
+        }
+        let last = events.last().expect("final progress event exists");
+        assert_eq!(last.assigned_blocks, f.grid.total_blocks);
+        assert!((last.overall_ratio - 1.0).abs() < 1e-6);
+    }
+
+    /// M6 差し替え評価: 全ブロック確定済みでタイル追加された場合、
+    /// improve_margin 以上良い候補があるブロックのみ差し替える
+    /// (詳細設計書 4.4「差し替え評価のみ行う」)
+    #[test]
+    fn rematch_swap_evaluates_improvement_margin() {
+        // 単色のメイン画像(全ブロックの mean_lab が同一)で決定的な条件を作る
+        let rgba = uniform_gray_image(96, 48); // cols=4, rows=2, 8 ブロック
+        let grid = crate::grid::compute_grid_info(96, 48, 24);
+        let features = crate::grid::compute_block_features(&rgba, 96, 48, 24);
+        let block_lab = crate::color::srgb8_to_lab(127, 127, 127);
+        let config = MosaicConfig {
+            improve_margin: 1.0,
+            ..MosaicConfig::default()
+        };
+
+        // 初回は遠いタイル(ΔE ≈ 20 / 25)しかない
+        let mut pool = pool_with_features(&[
+            ([(block_lab[0] + 20.0) as f32, 0.0, 0.0], 0.0, 1),
+            ([(block_lab[0] + 25.0) as f32, 0.0, 0.0], 0.0, 2),
+        ]);
+        let output_before =
+            run_phases(&grid, &features, &mut pool, &config, &rgba).expect("run should succeed");
+        let assigned_before: Vec<Option<u64>> = output_before
+            .matches
+            .iter()
+            .map(|m| Some(m.tile_id))
+            .collect();
+        assert!(assigned_before.iter().all(|slot| *slot != Some(9)));
+
+        // 現割当と完全一致(ΔE=0)のタイルを追加 → 差し替え評価で全ブロックが
+        // 改善(改善幅 ≈ 20 − 使用ペナルティ > margin)する
+        pool.add_tile(
+            9,
+            &flat_gray_buffer(FEATURE_THUMB as usize * FEATURE_THUMB as usize * 4, 200),
+            &flat_gray_buffer(64 * 64 * 4, 200),
+            64,
+            64,
+        )
+        .expect("tile registration should succeed");
+        // 追加タイルの特徴量をブロック色と完全一致させる(サムネイル計算値から固定へ)
+        pool.overwrite_feature_for_test(crate::tile::TileFeature {
+            id: 9,
+            thumb_w: 64,
+            thumb_h: 64,
+            mean_lab: [
+                block_lab[0] as f32,
+                block_lab[1] as f32,
+                block_lab[2] as f32,
+            ],
+            detail: 0.0,
+            usage: 0,
+        });
+        // 使用回数を現割当表から再集計してから差し替え評価に臨む(4.4)
+        pool.recount_usage(&assigned_before);
+
+        let mut rematch = BatchRunState::new_rematch(
+            grid,
+            &features,
+            assigned_before,
+            &output_before.rgba,
+            MatchMode::SwapEvaluate,
+        );
+        let mut now = 0.0_f64;
+        while !rematch.is_done() {
+            let s = rematch.step(&mut pool, &config, Some(now));
+            now += 16.0;
+            if s.done {
+                break;
+            }
+        }
+        let assigned_after = rematch.take_assignments();
+        // 全ブロックがタイル 9 へ差し替えられる(使用ペナルティ・隣接ペナルティ
+        // を含めても遠いタイルより十分良い)
+        assert!(assigned_after.iter().all(|slot| *slot == Some(9)));
+        // 使用回数は再マッチ後に現割当表から再集計される
+        pool.recount_usage(&assigned_after);
+        assert_eq!(pool.feature(9).expect("tile 9").usage, grid.total_blocks);
+
+        // 合成結果も差し替わる(出力バッファはシード = 旧合成結果の上に更新)
+        let composed = rematch.take_output().expect("completed rematch output");
+        assert_eq!(composed.len(), output_before.rgba.len());
+        assert_ne!(composed, output_before.rgba);
+    }
+
+    /// M6 タイル削除: 削除タイルが割当られていたブロックのみ未確定化して
+    /// 再マッチする(詳細設計書 4.4「タイル削除時」)
+    #[test]
+    fn rematch_after_tile_removal_retargets_only_affected_blocks() {
+        // 単色のメイン画像で両タイルが使われる確定的な割当を作る
+        let rgba = uniform_gray_image(96, 48); // 8 ブロック
+        let grid = crate::grid::compute_grid_info(96, 48, 24);
+        let features = crate::grid::compute_block_features(&rgba, 96, 48, 24);
+        let block_lab = crate::color::srgb8_to_lab(127, 127, 127);
+        let mut pool = pool_with_features(&[
+            ([(block_lab[0] + 10.0) as f32, 0.0, 0.0], 0.0, 1),
+            ([(block_lab[0] + 12.0) as f32, 0.0, 0.0], 0.0, 2),
+        ]);
+        let config = MosaicConfig::default();
+        let output =
+            run_phases(&grid, &features, &mut pool, &config, &rgba).expect("run should succeed");
+        let assigned: Vec<Option<u64>> = output.matches.iter().map(|m| Some(m.tile_id)).collect();
+        // ブロックごとに割当が分かれていること(両タイルが使われる)
+        assert!(assigned.contains(&Some(1)));
+        assert!(assigned.contains(&Some(2)));
+
+        // タイル 2 を削除: 割当表の該当ブロックを未確定にする(ホスト側の操作)
+        pool.remove_tile(2).expect("tile removal should succeed");
+        let removed_positions: Vec<usize> = assigned
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| **slot == Some(2))
+            .map(|(i, _)| i)
+            .collect();
+        let mut assigned_after_removal = assigned.clone();
+        for position in &removed_positions {
+            assigned_after_removal[*position] = None;
+        }
+        pool.recount_usage(&assigned_after_removal);
+
+        let mut rematch = BatchRunState::new_rematch(
+            grid,
+            &features,
+            assigned_after_removal,
+            &output.rgba,
+            MatchMode::FillUnmatched,
+        );
+        let mut now = 0.0_f64;
+        let mut recomposed_rows = Vec::new();
+        while !rematch.is_done() {
+            let s = rematch.step(&mut pool, &config, Some(now));
+            now += 16.0;
+            if let Some(batch) = s.result {
+                for row in batch.row_begin..batch.row_end {
+                    recomposed_rows.push(row);
+                }
+            }
+            if s.done {
+                break;
+            }
+        }
+        let final_assigned = rematch.take_assignments();
+        // すべてのブロックが現プール(タイル 1)で確定する
+        assert!(final_assigned.iter().all(|slot| *slot == Some(1)));
+        // 再合成は削除タイルが割当られていたブロックの行のみ(同一行の
+        // 複数ブロックは 1 行にまとまる)
+        let mut expected_rows: Vec<u32> = removed_positions
+            .iter()
+            .map(|position| (position / grid.cols as usize) as u32)
+            .collect();
+        expected_rows.dedup();
+        assert_eq!(recomposed_rows, expected_rows);
+    }
+
+    /// M6: 再マッチ・差し替えが発生しない差分再マッチは何も合成せず完了する
+    #[test]
+    fn rematch_without_targets_is_a_noop() {
+        let f = TestImage::new(96, 48, 24);
+        let mut pool = setup_pool(4);
+        let output = run_phases(&f.grid, &f.features, &mut pool, &f.config, &f.rgba)
+            .expect("run should succeed");
+        let assigned: Vec<Option<u64>> = output.matches.iter().map(|m| Some(m.tile_id)).collect();
+
+        let mut rematch = BatchRunState::new_rematch(
+            f.grid,
+            &f.features,
+            assigned,
+            &output.rgba,
+            MatchMode::FillUnmatched,
+        );
+        let mut now = 0.0_f64;
+        let mut events = Vec::new();
+        let mut batches = Vec::new();
+        while !rematch.is_done() {
+            let s = rematch.step(&mut pool, &f.config, Some(now));
+            now += 16.0;
+            if let Some(event) = s.progress {
+                events.push(event);
+            }
+            if let Some(batch) = s.result {
+                batches.push(batch);
+            }
+            if s.done {
+                break;
+            }
+        }
+        assert!(rematch.is_done());
+        assert!(!rematch.is_canceled());
+        assert!(batches.is_empty(), "no dirty rows must be recomposed");
+        // 完了イベントのみが発火する(進捗バーは 100% を維持)
+        let last = events.last().expect("final event exists");
+        assert_eq!(last.assigned_blocks, f.grid.total_blocks);
+        assert!((last.overall_ratio - 1.0).abs() < 1e-6);
+        // 合成結果は変更されない
+        let composed = rematch.take_output().expect("noop rematch keeps output");
+        assert_eq!(composed, output.rgba);
+    }
+
+    /// テスト用: (mean_lab, detail, id) の並びからプールを直接構築する
+    /// (match_engine の pool_with_tiles と同じ構成)
+    fn pool_with_features(tiles: &[([f32; 3], f32, u64)]) -> TilePool {
+        let mut pool = TilePool::new();
+        for &(lab, detail, id) in tiles {
+            let feature = crate::tile::TileFeature {
+                id,
+                thumb_w: 64,
+                thumb_h: 64,
+                mean_lab: lab,
+                detail,
+                usage: 0,
+            };
+            // 特徴量サムネイル(32×32)・合成サムネイル(64×64)とも単色。
+            // mean_lab / detail は overwrite_feature_for_test で固定値へ上書きする
+            // (add_tile はサムネイルから計算するため、距離計算の条件を固定する)
+            pool.add_tile(
+                id,
+                &flat_gray_buffer(FEATURE_THUMB as usize * FEATURE_THUMB as usize * 4, 100),
+                &flat_gray_buffer(64 * 64 * 4, 100),
+                64,
+                64,
+            )
+            .expect("tile registration should succeed");
+            pool.overwrite_feature_for_test(feature);
+        }
+        pool
+    }
+
+    /// 単色 RGBA バッファ(全ピクセル同一の灰色)
+    fn flat_gray_buffer(bytes: usize, value: u8) -> Vec<u8> {
+        let mut rgba = vec![0_u8; bytes];
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            pixel[0] = value;
+            pixel[1] = value;
+            pixel[2] = value;
+            pixel[3] = 255;
+        }
+        rgba
+    }
+
+    /// 単色テスト画像(全ピクセル同一の灰色。全ブロックの特徴量が同一になる)
+    fn uniform_gray_image(width: u32, height: u32) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..width * height {
+            rgba.extend_from_slice(&[127, 127, 127, 255]);
+        }
+        rgba
     }
 }

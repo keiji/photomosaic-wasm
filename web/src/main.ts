@@ -1,9 +1,13 @@
 /**
  * エントリポイント。状態遷移と UI・モックコアの結線を行う。
  *
- * M0 のデモフロー(handoff/04):
- *   S1 でメイン画像設定 → S2 でグリッド表示 → リセットで S1 へ戻る
- * 処理はすべてモックコア(グリッド計算のみ)で、WASM は M1 以降に接続する。
+ * M6 のデモフロー(handoff/04: インタラクティブ化):
+ *   S2 でのブロックサイズ変更・タイル追加/削除に生成処理が自動で追随する。
+ *   - ブロックサイズ変更: デバウンス(300ms)後、P2 スキップのフル再マッチで再生成
+ *   - タイル追加: 差分再マッチ(未確定ブロック優先 or 差し替え評価)
+ *   - タイル削除: 該当ブロックの再マッチ
+ *   - 実行中の変更は要求の合流(詳細設計書 7.5)でバッチ境界の
+ *     キャンセル後に最新状態で再開する
  */
 import './style.css';
 import { InvalidFileError, loadMainImage, loadTile } from './io/imageLoader';
@@ -199,10 +203,22 @@ async function main(): Promise<void> {
       tileList.removeTile(id);
       revokeTileUrl(id);
       syncTileStats();
-      // 完成済み generations はタイル構成の変更で無効になる(基本設計書 3.3)。
-      // 差分再マッチ(M6)導入まで、生成のやり直しは生成ボタンで行う
-      store.dispatch({ type: 'GENERATION_INVALIDATED' });
-      store.dispatch({ type: 'TILES_REMOVED', remaining: core.getTileCount() });
+      const remaining = core.getTileCount();
+      store.dispatch({ type: 'TILES_REMOVED', remaining });
+      if (remaining === 0) {
+        // タイル 0 枚: MAIN_READY へ戻る(フォトモザイク表示は解除し、
+        // メイン画像 + グリッド表示に戻る。基本設計書 1.4)
+        progress.reset();
+        if (currentGrid !== null) {
+          preview.drawGrid(currentGrid, core.getBlockMeanColors());
+        }
+        return;
+      }
+      // 残りタイルがある S2 では該当ブロックの差分再マッチで自動追従する(M6)
+      const data = store.getData();
+      if (data.state === 'MAIN_READY' || data.state === 'DONE' || data.state === 'GENERATING') {
+        await startRematch();
+      }
     } catch (err) {
       console.error('removeTile failed', err);
       showError(messages.errorLoadFailed);
@@ -250,9 +266,16 @@ async function main(): Promise<void> {
     }
 
     if (added > 0) {
-      // 先に生成結果を無効化(完成済みなら再生成待ちへ戻し、その後枚数を更新)
-      store.dispatch({ type: 'GENERATION_INVALIDATED' });
+      // 枚数を更新する(EMPTY → TILES_READY の遷移は状態モデルに従う)
       store.dispatch({ type: 'TILES_ADDED', count: added });
+      // S2(メイン画像設定済み)では差分再マッチで自動追従する(M6)。
+      // メイン画像未設定(S1)では、メイン画像設定時の自動生成で反映される
+      const data = store.getData();
+      if (data.state === 'MAIN_READY' || data.state === 'DONE' || data.state === 'GENERATING') {
+        // 要求の合流(詳細設計書 7.5): 追加完了後の最新状態だけで
+        // 1 回の再マッチを開始する(追加途中での再開は行わない)
+        await startRematch();
+      }
     }
     syncTileStats();
     if (guardExceeded) {
@@ -272,52 +295,59 @@ async function main(): Promise<void> {
     onFiles: (files) => void addTileFiles(files),
   });
 
-  // --- S2: ブロックサイズ変更(300ms デバウンス後にグリッド再計算) ---
-  controls.handleBlockSizeChange(async (px) => {
-    // 生成中の変更は M6 の差分再マッチで発展させる(M5: 実行中の生成をキャンセル)。
-    // 詳細設計書 7.5: 無駄な再計算をバッチ境界で中止する
-    if (store.getData().state === 'GENERATING') {
-      generation += 1;
-      core.cancel();
-      store.dispatch({ type: 'GENERATION_CANCELED' });
-      progress.setPhase(messages.canceledDone);
-    }
-    try {
-      const grid = await core.setBlockSize(px);
-      store.setBlockCounts(grid.totalBlocks, 0);
-      currentGrid = grid;
-      preview.drawGrid(grid, core.getBlockMeanColors());
-      // 完成済みの合成結果はグリッドの再計算で無効になる(コア側で composed を破棄)。
-      // 再生成は生成ボタンで行う(M4。M6 で自動再生成に拡張)
-      store.dispatch({ type: 'GENERATION_INVALIDATED' });
-    } catch (err) {
-      // コア未設定(メイン画像なし)の変更は無視する
-      console.error('setBlockSize failed', err);
-    }
-  });
-
   // --- S2: フォトモザイクの生成(M5: 行バッチ駆動・進捗・部分描画) ---
   // 実行世代: キャンセルで +1 し、完了コールバックが最新世代のものだけを反映する
   let generation = 0;
 
-  const startGeneration = async (): Promise<void> => {
-    clearError();
-    if (currentGrid === null) {
+  // --- S2: ブロックサイズ変更(300ms デバウンス後、P2 スキップのフル再マッチで自動再生成) ---
+  controls.handleBlockSizeChange(async (px) => {
+    // 実行中の生成は要求の合流(詳細設計書 7.5)でバッチ境界のキャンセル後に
+    // 最新状態で再開する(連続操作の無駄な再計算を中止する)
+    if (store.getData().state === 'GENERATING') {
+      generation += 1;
+      core.cancel();
+    }
+    let grid: GridInfo;
+    try {
+      grid = await core.setBlockSize(px);
+      store.setBlockCounts(grid.totalBlocks, 0);
+      currentGrid = grid;
+      // 変更直後はグリッド線 + 平均色で表示する(基本設計書 2.2)
+      preview.drawGrid(grid, core.getBlockMeanColors());
+    } catch (err) {
+      // コア未設定(メイン画像なし)の変更は無視する
+      console.error('setBlockSize failed', err);
       return;
     }
-    // 生成開始: プレビューをいったんグリッド表示(平均色)へ戻し、
-    // 完了した行バッチから順にフォトモザイクへ置き換わる(基本設計書 2.2)
-    preview.drawGrid(currentGrid, core.getBlockMeanColors());
-    store.dispatch({ type: 'GENERATION_STARTED' });
-    progress.setCounts(0, currentGrid.totalBlocks);
+    // M6: 構成画像があれば自動再生成(タイル特徴量はコア内キャッシュの再利用)。
+    // タイルが 0 枚の変更では再生成待ち(MAIN_READY)へ留まる
+    if (store.getData().tileCount > 0) {
+      store.dispatch({ type: 'GENERATION_STARTED' });
+      progress.setCounts(0, grid.totalBlocks);
+      await executeRun('full');
+    } else {
+      store.dispatch({ type: 'GENERATION_INVALIDATED' });
+    }
+  });
+
+  /**
+   * 生成・差分再マッチの共通完了処理。
+   * 呼び出し時点の世代で完了を判定する(実行中の変更要求は generation を
+   * 進めているため、古い実行の完了処理はスキップされる)
+   */
+  const executeRun = async (mode: 'full' | 'rematch'): Promise<void> => {
     const myRun = generation;
     try {
-      await core.run();
+      if (mode === 'rematch') {
+        await core.rematch();
+      } else {
+        await core.run();
+      }
       if (myRun !== generation) {
         return; // キャンセル済み: 完了処理は行わない
       }
       if (store.getData().state !== 'GENERATING') {
-        return; // 実行中に状態が変わった(タイル全削除など。M6 で差分処理に発展)
+        return; // 実行中に状態が変わった(タイル全削除など)
       }
       store.dispatch({ type: 'GENERATION_FINISHED' });
       const data = store.getData();
@@ -336,6 +366,42 @@ async function main(): Promise<void> {
       showError(messages.errorGenerate);
       progress.reset();
     }
+  };
+
+  /**
+   * フォトモザイクの生成を開始する(生成ボタン・自動開始)。
+   * プレビューをいったんグリッド表示(平均色)へ戻し、完了した行バッチから
+   * 順にフォトモザイクへ置き換わる(基本設計書 2.2)。全ブロックを再マッチする
+   */
+  const startGeneration = async (): Promise<void> => {
+    clearError();
+    if (currentGrid === null) {
+      return;
+    }
+    preview.drawGrid(currentGrid, core.getBlockMeanColors());
+    store.dispatch({ type: 'GENERATION_STARTED' });
+    progress.setCounts(0, currentGrid.totalBlocks);
+    await executeRun('full');
+  };
+
+  /**
+   * 差分再マッチを開始する(M6: タイル追加・削除の追随)。
+   * キャンセル済み実行の再開もここで行う(要求の合流: 詳細設計書 7.5)。
+   * 実行中のプレビューは維持し、再マッチした行バッチのみが転写される
+   */
+  const startRematch = async (): Promise<void> => {
+    clearError();
+    if (currentGrid === null || core.getTileCount() === 0) {
+      return;
+    }
+    if (store.getData().state === 'GENERATING') {
+      // 実行中の生成をバッチ境界で停止して最新状態で再開する。
+      // 直後に再開するため CANCELED 遷移には戻さない(状態は GENERATING のまま)
+      generation += 1;
+      core.cancel();
+    }
+    store.dispatch({ type: 'GENERATION_STARTED' });
+    await executeRun('rematch');
   };
   controls.handleGenerate(() => void startGeneration());
 

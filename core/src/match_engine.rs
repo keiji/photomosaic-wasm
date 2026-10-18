@@ -8,6 +8,9 @@
 //!   detail が大きい方(情報量が多い方)を優先する
 //! - 走査順は「ブロック番号昇順 × タイル ID 昇順」に固定し、同一入力に対して
 //!   決定的な結果を保証する(handoff/02 4 章の決定性指針)
+//! - 割当表は全ブロック分の `Option<u64>`(None = 未確定ブロック)とし、
+//!   フルマッチと差分再マッチ(M6: 未確定のみマッチ / 差し替え評価)を
+//!   単一の実装で扱う
 
 use crate::config::MosaicConfig;
 use crate::grid::BlockFeature;
@@ -54,8 +57,8 @@ pub fn distance(
 
 /// 全ブロックをマッチングする(P3)。
 ///
-/// 範囲 `[0, 全ブロック数)` の [`match_block_range`] と同一の結果を返す
-/// (行バッチ実装 M5 とは別に一括実行を残す。決定性は走査順で保証するため等価)。
+/// 未確定のみの割当表へ [`match_unmatched_range`] を適用した結果と同一
+/// (フルランと差分再マッチが単一の実装を共有する)。
 ///
 /// - `cols` は隣接参照(直上 = block_index - cols、直左 = block_index - 1)に使用
 /// - 選択タイルの使用回数を [`TilePool`] 側で加算する
@@ -66,46 +69,59 @@ pub fn match_blocks(
     pool: &mut TilePool,
     config: &MosaicConfig,
 ) -> Vec<MatchResult> {
-    let mut assigned: Vec<u64> = Vec::with_capacity(blocks.len());
-    match_block_range(blocks, cols, pool, config, &mut assigned, 0, blocks.len())
+    let mut assigned: Vec<Option<u64>> = vec![None; blocks.len()];
+    match_unmatched_range(blocks, cols, pool, config, &mut assigned, 0, blocks.len());
+    assignments_to_matches(&assigned)
 }
 
-/// ブロック範囲 `[block_begin, block_end)` をマッチングする(P3 の行バッチ実行)。
+/// 割当表からマッチ結果を組み立てる(未確定ブロックは除外)。
 ///
-/// - `assigned` は `[0, block_begin)` の確定済み割当(タイル ID)を保持するバッファ。
-///   直上・直左の同一タイル判定に使い、本関数が選択した分を末尾へ push する
-///   (手前のバッチで確定した割当を隣接参照に利用するため。M5 の行バッチ化)
+/// ブロック番号は割当表上の位置(= BlockFeature.index)と一致する
+pub fn assignments_to_matches(assigned: &[Option<u64>]) -> Vec<MatchResult> {
+    assigned
+        .iter()
+        .enumerate()
+        .filter_map(|(i, tile_id)| {
+            tile_id.map(|tile_id| MatchResult {
+                block_index: u32::try_from(i).expect("block index fits u32"),
+                tile_id,
+            })
+        })
+        .collect()
+}
+
+/// ブロック範囲 `[block_begin, block_end)` のうち未確定(None)のブロックを
+/// マッチする(P3 の行バッチ実行)。
+///
+/// - `assigned` は全ブロック長の割当表(長さは `blocks.len()` と一致させること)。
+///   選択結果を in-place で書き込み、確定済みブロックは変更せず
+///   隣接参照(直上・直左)に利用する。M6 の差分再マッチでは既存割当との
+///   混在走査になる(フルランは全要素 None の初期表で呼び出す)
 /// - 走査順は「ブロック番号昇順 × タイル ID 昇順」に固定し、同一入力に対して
 ///   決定的な結果を保証する(handoff/02 4 章の決定性指針)
-/// - 返す [`MatchResult`] の `block_index` は画像全体での番号(行優先)
-/// - タイルプールが空または `cols == 0` の場合は空の結果を返す
-pub fn match_block_range(
+/// - 返り値は本呼び出しでマッチしたブロック位置(昇順。位置 = block_index)
+/// - タイルプールが空・`cols == 0`・割当表の長さ不一致の場合は空の結果を返す
+pub fn match_unmatched_range(
     blocks: &[BlockFeature],
     cols: u32,
     pool: &mut TilePool,
     config: &MosaicConfig,
-    assigned: &mut Vec<u64>,
+    assigned: &mut [Option<u64>],
     block_begin: usize,
     block_end: usize,
-) -> Vec<MatchResult> {
-    let mut results: Vec<MatchResult> = Vec::new();
-    if pool.tile_count() == 0 || cols == 0 {
-        return results;
+) -> Vec<u32> {
+    let mut matched: Vec<u32> = Vec::new();
+    if pool.tile_count() == 0 || cols == 0 || assigned.len() != blocks.len() {
+        return matched;
     }
     let block_begin = block_begin.min(block_end.min(blocks.len()));
     let block_end = block_end.min(blocks.len());
-    // 呼び出し側の取り違え検知: 接頭辞と開始位置が一致しない場合は実行しない
-    // (隣接参照の履歴が不完全なまま走査するのを避ける防御)
-    if assigned.len() != block_begin {
-        return results;
-    }
 
-    for (i, block) in blocks
-        .iter()
-        .enumerate()
-        .skip(block_begin)
-        .take(block_end - block_begin)
-    {
+    for (i, block) in blocks.iter().enumerate().take(block_end).skip(block_begin) {
+        if assigned[i].is_some() {
+            continue; // 確定済み(差分再マッチでは既存割当として隣接参照に使うのみ)
+        }
+
         // 全タイルの使用回数が usage_cap に達したら一括リセット(スタック防止)
         if pool.all_usage_reached(config.usage_cap) {
             pool.reset_usage();
@@ -113,9 +129,9 @@ pub fn match_block_range(
 
         let block_index = u32::try_from(i).expect("block index fits u32");
         let col = block_index % cols;
-        let left_id = if col > 0 { Some(assigned[i - 1]) } else { None };
+        let left_id = if col > 0 { assigned[i - 1] } else { None };
         let above_id = if i >= cols as usize {
-            Some(assigned[i - cols as usize])
+            assigned[i - cols as usize]
         } else {
             None
         };
@@ -153,14 +169,88 @@ pub fn match_block_range(
 
         let chosen_tile = near_best.or(best).expect("pool is non-empty").1;
         pool.bump_usage(chosen_tile.id);
-        assigned.push(chosen_tile.id);
-        results.push(MatchResult {
-            block_index: block.index,
-            tile_id: chosen_tile.id,
-        });
+        assigned[i] = Some(chosen_tile.id);
+        matched.push(block_index);
     }
 
-    results
+    matched
+}
+
+/// ブロック範囲 `[block_begin, block_end)` に対し差し替え評価を行う
+/// (詳細設計書 4.4 差分再マッチ: タイル追加時・全ブロック確定済みの場合)。
+///
+/// - 各ブロックについて現割当の距離と全タイル(追加タイルを含む)の最小距離を
+///   再計算し、現割当より `improve_margin`(ΔE 換算)以上良い候補がある場合に
+///   差し替える(使用回数・隣接ペナルティは再評価する)
+/// - 差し替えは走査に逐次反映する(以降のブロックの評価に usage の変化が波及する。
+///   走査順はブロック番号昇順で決定的)
+/// - 返り値は差し替えたブロック位置(昇順。位置 = block_index)
+pub fn evaluate_swap_range(
+    blocks: &[BlockFeature],
+    cols: u32,
+    pool: &mut TilePool,
+    config: &MosaicConfig,
+    assigned: &mut [Option<u64>],
+    block_begin: usize,
+    block_end: usize,
+) -> Vec<u32> {
+    let mut swapped: Vec<u32> = Vec::new();
+    if pool.tile_count() == 0 || cols == 0 || assigned.len() != blocks.len() {
+        return swapped;
+    }
+    let block_begin = block_begin.min(block_end.min(blocks.len()));
+    let block_end = block_end.min(blocks.len());
+
+    for (i, block) in blocks.iter().enumerate().take(block_end).skip(block_begin) {
+        let Some(current_id) = assigned[i] else {
+            continue; // 未確定ブロックは対象外(match_unmatched_range で埋める)
+        };
+        let Some(current_tile) = pool.feature(current_id) else {
+            continue; // 削除済みタイルの割当(防御。未確定化して fill 再マッチする)
+        };
+        let current_tile = *current_tile; // Copy(プール走査と借用を衝突させない)
+
+        let block_index = u32::try_from(i).expect("block index fits u32");
+        let col = block_index % cols;
+        let left_id = if col > 0 { assigned[i - 1] } else { None };
+        let above_id = if i >= cols as usize {
+            assigned[i - cols as usize]
+        } else {
+            None
+        };
+        let neighbor_current = left_id == Some(current_id) || above_id == Some(current_id);
+        let current_d = distance(
+            block,
+            &current_tile,
+            current_tile.usage,
+            neighbor_current,
+            config,
+        );
+
+        // 全タイル(ID 昇順走査)の距離を再評価し最小を選ぶ。
+        // 差し替え評価は improve_margin による純粋な距離比較のみを行う
+        // (identical_de による detail 優先は初回マッチの規則)
+        let mut best: Option<(f32, u64)> = None;
+        for tile in pool.features() {
+            let neighbor_same = left_id == Some(tile.id) || above_id == Some(tile.id);
+            let d = distance(block, tile, tile.usage, neighbor_same, config);
+            if best.is_none_or(|(best_d, _)| d < best_d) {
+                best = Some((d, tile.id));
+            }
+        }
+        let Some((best_d, best_id)) = best else {
+            continue;
+        };
+
+        if best_id != current_id && current_d - best_d >= config.improve_margin {
+            assigned[i] = Some(best_id);
+            pool.bump_usage(best_id);
+            pool.decrease_usage(current_id);
+            swapped.push(block_index);
+        }
+    }
+
+    swapped
 }
 
 #[cfg(test)]
@@ -396,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn match_block_range_full_range_equals_match_blocks() {
+    fn match_unmatched_range_full_range_equals_match_blocks() {
         let target: [f32; 3] = [50.0, 1.0, 2.0];
         let tiles = [
             ([51.0, 1.0, 2.0], 3.0, 1),
@@ -412,8 +502,8 @@ mod tests {
         };
         let ranged = {
             let mut pool = pool_with_tiles(&tiles);
-            let mut assigned = Vec::new();
-            match_block_range(
+            let mut assigned: Vec<Option<u64>> = vec![None; blocks.len()];
+            match_unmatched_range(
                 &blocks,
                 4,
                 &mut pool,
@@ -421,7 +511,8 @@ mod tests {
                 &mut assigned,
                 0,
                 blocks.len(),
-            )
+            );
+            assignments_to_matches(&assigned)
         };
         assert_eq!(whole, ranged);
         assert_eq!(ranged.len(), blocks.len());
@@ -431,9 +522,42 @@ mod tests {
     }
 
     #[test]
-    fn match_block_range_resumes_with_neighbor_history() {
-        // 行バッチ化(M5): 全体一括と「行ごとの分割」が同一結果になること。
-        // cols=4 / 4 行 = 16 ブロックを 1 行ずつ(4 回)に分けて実行する
+    fn match_unmatched_range_skips_already_assigned_blocks() {
+        // 差分再マッチ(M6): 確定済みブロックは変更せず、未確定のみ埋める。
+        // cols=4 / 4 行 = 16 ブロックのうちブロック 5〜10 を事前確定しておく
+        let target: [f32; 3] = [50.0, 0.5, -0.5];
+        let tiles = [([50.5, 0.0, 0.0], 1.0, 1), ([50.0, 1.0, -1.0], 0.5, 2)];
+        let blocks = uniform_blocks(target, 2.0, 16);
+        let config = MosaicConfig::default();
+
+        let mut assigned: Vec<Option<u64>> = (0..16_u64).map(|i| Some(i + 100)).collect();
+        let mut pool = pool_with_tiles(&tiles);
+        let matched = match_unmatched_range(&blocks, 4, &mut pool, &config, &mut assigned, 0, 16);
+        // 事前確定分(100..116)は変更されず、未確定ブロックは存在しない
+        assert!(matched.is_empty());
+        assert!(assigned.iter().all(Option::is_some));
+        assert_eq!(assigned[0], Some(100));
+
+        // 半分を未確定に戻して再マッチ: 未確定のみが埋まる
+        let mut assigned: Vec<Option<u64>> = (0..16_u64).map(|i| Some(i + 100)).collect();
+        for slot in assigned.iter_mut().skip(5).take(6) {
+            *slot = None;
+        }
+        let matched = match_unmatched_range(&blocks, 4, &mut pool, &config, &mut assigned, 0, 16);
+        assert_eq!(matched, vec![5, 6, 7, 8, 9, 10], "only unmatched positions");
+        for (i, slot) in assigned.iter().enumerate() {
+            if (5..11).contains(&i) {
+                assert!(slot.is_some(), "block {i} must be matched");
+            } else {
+                assert_eq!(*slot, Some(i as u64 + 100), "block {i} must be kept");
+            }
+        }
+    }
+
+    #[test]
+    fn match_unmatched_range_resumes_with_neighbor_history() {
+        // 行バッチ化(M5)+ 差分再マッチ(M6): 全体一括と「行ごとの分割」が
+        // 同一結果になること。cols=4 / 4 行 = 16 ブロックを 1 行ずつ(4 回)に分ける
         let target: [f32; 3] = [50.0, 0.5, -0.5];
         let tiles = [
             ([50.5, 0.0, 0.0], 1.0, 1),
@@ -449,39 +573,122 @@ mod tests {
             match_blocks(&blocks, cols, &mut pool, &config)
         };
         let mut pool = pool_with_tiles(&tiles);
-        let mut assigned: Vec<u64> = Vec::new();
-        let mut batched: Vec<MatchResult> = Vec::new();
+        let mut assigned: Vec<Option<u64>> = vec![None; blocks.len()];
         let mut pos = 0_usize;
         while pos < blocks.len() {
             let end = (pos + cols as usize).min(blocks.len());
-            batched.extend(match_block_range(
-                &blocks,
-                cols,
-                &mut pool,
-                &config,
-                &mut assigned,
-                pos,
-                end,
-            ));
+            match_unmatched_range(&blocks, cols, &mut pool, &config, &mut assigned, pos, end);
             pos = end;
         }
+        let batched = assignments_to_matches(&assigned);
         assert_eq!(whole, batched, "row batch must not change match results");
     }
 
     #[test]
-    fn match_block_range_out_of_bounds_is_clamped() {
+    fn match_unmatched_range_out_of_bounds_is_clamped() {
         let blocks = uniform_blocks([50.0, 0.0, 0.0], 0.0, 4);
         let mut pool = pool_with_tiles(&[([50.5, 0.0, 0.0], 0.0, 1)]);
         let config = MosaicConfig::default();
         // 範囲が窓外(開始 > 終了、block_end > 全体)でも安全にクランプされる
-        let mut assigned = Vec::new();
-        let results = match_block_range(&blocks, 2, &mut pool, &config, &mut assigned, 4, 10);
+        let mut assigned: Vec<Option<u64>> = vec![None; 4];
+        let results = match_unmatched_range(&blocks, 2, &mut pool, &config, &mut assigned, 4, 10);
         assert!(results.is_empty());
-        assert!(assigned.is_empty());
-        let mut assigned = Vec::new();
-        let results = match_block_range(&blocks, 2, &mut pool, &config, &mut assigned, 0, 100);
+        let mut assigned: Vec<Option<u64>> = vec![None; 4];
+        let results = match_unmatched_range(&blocks, 2, &mut pool, &config, &mut assigned, 0, 100);
         assert_eq!(results.len(), 4);
-        assert_eq!(assigned.len(), 4);
+        assert!(assigned.iter().all(Option::is_some));
+        // 割当表の長さ不一致も安全に空を返す(呼び出し側の取り違え検知)
+        let mut assigned: Vec<Option<u64>> = vec![None; 3];
+        let results = match_unmatched_range(&blocks, 2, &mut pool, &config, &mut assigned, 0, 4);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn evaluate_swap_only_beyond_improve_margin() {
+        // 差し替え評価(詳細設計書 4.4): 現割当より improve_margin 以上良い
+        // 候補がある場合のみ差し替える。使用回数・隣接ペナルティは再評価する
+        // (cols=2・1 行 2 ブロック。現割当は色は同じで ID の違うタイル 1 / 3 に
+        // 分けておき、現割当の隣接ペナルティが評価に混ざらない条件を作る)
+        let target: [f32; 3] = [50.0, 0.0, 0.0];
+        let blocks = uniform_blocks(target, 0.0, 2);
+        let current: [f32; 3] = [51.0, 0.0, 0.0]; // ΔE76 = 1.0
+        let better: [f32; 3] = [50.2, 0.0, 0.0]; // ΔE76 = 0.2(改善 0.8)
+
+        // マージン 1.0(既定)→ 改善 0.8 では現状維持
+        {
+            let mut pool =
+                pool_with_tiles(&[(current, 0.0, 1), (better, 0.0, 2), (current, 0.0, 3)]);
+            let mut assigned = vec![Some(1_u64), Some(3_u64)];
+            let config = MosaicConfig::default();
+            let swapped = evaluate_swap_range(&blocks, 2, &mut pool, &config, &mut assigned, 0, 2);
+            assert!(swapped.is_empty(), "improvement below margin must keep");
+            assert_eq!(assigned, vec![Some(1), Some(3)]);
+            assert_eq!(pool.feature(2).expect("tile 2").usage, 0);
+        }
+        // マージン 0.5 → 改善 0.8 がマージンを超えるブロックのみ差し替わる。
+        // ブロック 1 は候補タイル 2 が直左(差し替え後のタイル 2)と同一になり
+        // 隣接ペナルティ + 使用ペナルティで有利にならず現状維持になる
+        // (使用回数・隣接ペナルティの再評価)
+        {
+            let mut pool =
+                pool_with_tiles(&[(current, 0.0, 1), (better, 0.0, 2), (current, 0.0, 3)]);
+            let mut assigned = vec![Some(1_u64), Some(3_u64)];
+            let config = MosaicConfig {
+                improve_margin: 0.5,
+                ..MosaicConfig::default()
+            };
+            let swapped = evaluate_swap_range(&blocks, 2, &mut pool, &config, &mut assigned, 0, 2);
+            assert_eq!(swapped, vec![0], "only block 0 exceeds the margin");
+            assert_eq!(assigned, vec![Some(2), Some(3)]);
+            // 使用回数の再評価: 差し替えで old が減り new が増える
+            assert_eq!(pool.feature(1).expect("tile 1").usage, 0);
+            assert_eq!(pool.feature(2).expect("tile 2").usage, 1);
+            assert_eq!(pool.feature(3).expect("tile 3").usage, 0);
+        }
+    }
+
+    #[test]
+    fn evaluate_swap_updates_usage_for_subsequent_blocks() {
+        // 差し替えは逐次反映される: 1 ブロック目の差し替えで usage が変わり、
+        // 2 ブロック目の評価に波及する(使用ペナルティの再評価)
+        let target: [f32; 3] = [50.0, 0.0, 0.0];
+        let near: [f32; 3] = [50.0, 0.0, 0.0]; // ΔE76 = 0
+        let other: [f32; 3] = [51.0, 0.0, 0.0]; // ΔE76 = 1
+        let blocks = uniform_blocks(target, 0.0, 2);
+        // new タイル(2)は距離最小だが usage 3 → D = 0.35*3 = 1.05。
+        // 現割当(1)は usage 0 → D = 1.0。初回評価では差し替えられない(改善なし)。
+        // 1 ブロック目でタイル 1 への差し替えが起きない場合でも、
+        // タイル 2 の usage が下がれば次ブロックの評価が変わる状況を作る
+        let mut pool = pool_with_tiles(&[(other, 0.0, 1), (near, 0.0, 2)]);
+        for _ in 0..3 {
+            pool.bump_usage(2);
+        }
+        let config = MosaicConfig {
+            improve_margin: 0.5,
+            ..MosaicConfig::default()
+        };
+        // 現割当はタイル 1(ΔE=1、usage 0 → D=1.0)。
+        // ブロック 0: best はタイル 2(D=1.05)→ 現割当維持。
+        // タイル 2 の usage は変わらないためブロック 1 も維持(決定的な不変性)
+        let mut assigned = vec![Some(1_u64), Some(1_u64)];
+        let swapped = evaluate_swap_range(&blocks, 1, &mut pool, &config, &mut assigned, 0, 2);
+        assert!(swapped.is_empty());
+        assert_eq!(assigned, vec![Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn evaluate_swap_skips_unassigned_blocks() {
+        // 未確定ブロック(None)は差し替え評価の対象外(match で埋める)
+        let target: [f32; 3] = [50.0, 0.0, 0.0];
+        let near: [f32; 3] = [50.0, 0.0, 0.0];
+        let blocks = uniform_blocks(target, 0.0, 2);
+        let mut pool = pool_with_tiles(&[(near, 0.0, 1), ([49.0, 0.0, 0.0], 0.0, 2)]);
+        let mut assigned = vec![None, Some(1_u64)];
+        let config = MosaicConfig::default();
+        let swapped = evaluate_swap_range(&blocks, 1, &mut pool, &config, &mut assigned, 0, 2);
+        assert!(swapped.is_empty(), "None block must be skipped");
+        assert_eq!(assigned[0], None);
+        assert_eq!(assigned[1], Some(1));
     }
 
     #[test]

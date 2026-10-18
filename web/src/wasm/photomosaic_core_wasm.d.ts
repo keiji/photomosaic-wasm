@@ -122,8 +122,28 @@ export function add(a: number, b: number): number;
  * - `feature_rgba`: 特徴量用サムネイル(32×32 固定。ホスト側でボックスフィルタ縮小済み)
  * - `compose_rgba`: 合成用サムネイル(長辺 64 上限、アスペクト維持。P4 合成用に保持)
  * - メモリガード超過時はエラーになり、プールは変更されない
+ * - メイン画像設定済みの場合は差し替え評価の対象として記録し、
+ *   次の差分再マッチ([`begin_rematch`])で追随する(M6)
  */
 export function add_tile(id: bigint, feature_rgba: Uint8Array, compose_rgba: Uint8Array, compose_w: number, compose_h: number): JsTileInfo;
+
+/**
+ * 差分再マッチを開始する(M6: 詳細設計書 4.4 差分再マッチ / 7.5 要求の合流)。
+ *
+ * 現在の割当表とタイルプールの状態からモードを決定する:
+ *
+ * - 割当表が空(初回生成・ブロックサイズ変更後)→ 全ブロックをマッチする
+ *   ([`begin_run`] と同一。未確定ブロック = 全ブロック)
+ * - 未確定ブロックがある(タイル追加・削除後)→ 未確定ブロックのみマッチする
+ * - 全ブロック確定済みでタイルが追加された → 差し替え評価のみ行う
+ *   (現割当より `improve_margin` 以上良い候補がある場合に差し替える)
+ * - 再マッチ不要(未確定なし・追加なし)→ 何もせず即時に完了する
+ *
+ * 使用回数 usage は開始時・完了時に現割当表から再集計する(4.4:
+ * 「ペナルティの連続性を保つ」)。進捗・部分結果は run と同一の
+ * [`step_run`] 駆動で得られる(差分再マッチも P3 として計上)
+ */
+export function begin_rematch(): void;
 
 /**
  * フォトモザイクの P3(マッチング)+ P4(合成)を開始する(M5)。
@@ -133,7 +153,8 @@ export function add_tile(id: bigint, feature_rgba: Uint8Array, compose_rgba: Uin
  * - 実行は行バッチ(row_batch 行)単位で進む。ホストは [`step_run`] を
  *   完了まで繰り返し呼び出し、バッチ境界で JS へ制御を返して
  *   UI 更新・進捗表示・部分描画を介在させる(詳細設計書 8.1)
- * - 使用回数 usage は開始時に正規化する(M4 と同一挙動)
+ * - 使用回数 usage は開始時に正規化する(M4 と同一挙動)。
+ *   差分再マッチ([`begin_rematch`])とは異なり全ブロックを再マッチする
  * - 進行中の別 run があれば破棄して新しく開始する
  */
 export function begin_run(): void;
@@ -194,7 +215,11 @@ export function get_tiles_memory_bytes(): number;
 export function get_version(): string;
 
 /**
- * プールからタイルを削除する(M3 ではマッチ結果が存在しないため再マッチ対象なし)
+ * プールからタイルを削除する。
+ *
+ * 削除タイルが割当られていたブロックは未確定(None)に戻り、
+ * 次の差分再マッチ([`begin_rematch`])で現プールから再割当てされる
+ * (詳細設計書 4.4 差分再マッチ: タイル削除時)
  */
 export function remove_tile(id: bigint): void;
 
@@ -210,6 +235,10 @@ export function run(): void;
 
 /**
  * P1 再実行: ブロックサイズを変更してグリッド・ブロック特徴量を再計算する
+ *
+ * 基本設計書 3.3: グリッド再計算 → 全ブロック再マッチ → 再合成。
+ * タイル特徴量はブロックサイズに依存しないため P2 は再実行しない(キャッシュ再利用)。
+ * 割当表は全ブロック未確定に戻る(次の run で全ブロック再マッチになる)
  */
 export function set_block_size(px: number): JsGridInfo;
 
@@ -251,6 +280,7 @@ export interface InitOutput {
     readonly __wbg_jstileinfo_free: (a: number, b: number) => void;
     readonly add: (a: number, b: number) => number;
     readonly add_tile: (a: number, b: bigint, c: number, d: number, e: number, f: number, g: number, h: number) => void;
+    readonly begin_rematch: (a: number) => void;
     readonly begin_run: (a: number) => void;
     readonly cancel: () => void;
     readonly clear_main_image: () => void;

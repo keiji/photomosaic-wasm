@@ -8,6 +8,7 @@ export const __wbg_jsstepoutput_free: (a: number, b: number) => void;
 export const __wbg_jstileinfo_free: (a: number, b: number) => void;
 export const add: (a: number, b: number) => number;
 export const add_tile: (a: number, b: bigint, c: number, d: number, e: number, f: number, g: number, h: number) => void;
+export const begin_rematch: (a: number) => void;
 export const begin_run: (a: number) => void;
 export const cancel: () => void;
 export const clear_main_image: () => void;
