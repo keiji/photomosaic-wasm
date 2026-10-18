@@ -30,57 +30,6 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
     expect(wasm.add(-1, 1)).toBe(0);
   });
 
-  it('tick はスロットル規則(16ms / 1%)に従う', () => {
-    const demo = new wasm.ProgressDemo(1000);
-    try {
-      // 初回は即発火
-      expect(demo.tick(0, 0)).toBeDefined();
-      // 8ms 経過・0.5% 変化 → 抑制
-      expect(demo.tick(8, 0.005)).toBeUndefined();
-      // 合計 16ms 経過 → 時間条件で発火
-      const event = demo.tick(16, 0.008);
-      expect(event).toBeDefined();
-      expect(event?.total_blocks).toBe(1000);
-      expect(event?.phase_code).toBe('match');
-      expect(event?.assigned_blocks).toBe(8);
-    } finally {
-      demo.free();
-    }
-  });
-
-  it('tick は 1% 以上の変化なら時間が短くても発火する', () => {
-    const demo = new wasm.ProgressDemo(1000);
-    try {
-      expect(demo.tick(0, 0)).toBeDefined();
-      const event = demo.tick(1, 0.02);
-      expect(event).toBeDefined();
-      expect(event?.assigned_blocks).toBe(20);
-    } finally {
-      demo.free();
-    }
-  });
-
-  it('範囲外の ratio では発火しない', () => {
-    const demo = new wasm.ProgressDemo(1000);
-    try {
-      expect(demo.tick(0, -0.5)).toBeUndefined();
-      expect(demo.tick(0, 1.5)).toBeUndefined();
-    } finally {
-      demo.free();
-    }
-  });
-
-  it('overall_ratio は固定配分で計算される(P3 前に P1/P2 で 30% 進む)', () => {
-    const demo = new wasm.ProgressDemo(1000);
-    try {
-      // P1(10%) + P2(20%) を完了し、P3 が始まった時点
-      const event = demo.tick(0, 0);
-      expect(event?.overall_ratio).toBeCloseTo(0.3, 5);
-    } finally {
-      demo.free();
-    }
-  });
-
   describe('メイン画像解析(P1)', () => {
     it('set_main_image で GridInfo とコア算出の平均色を取得できる', () => {
       // 2x2 の単色赤
@@ -370,6 +319,139 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       wasm.set_block_size(12); // composed はクリア
       const exported = wasm.export_main_image();
       expect(Array.from(exported)).toEqual(Array.from(main));
+    });
+  });
+
+  describe('行バッチ実行(M5: 進捗・部分結果・キャンセル)', () => {
+    const featureThumb = (r: number, g: number, b: number): Uint8Array => {
+      const data = new Uint8Array(32 * 32 * 4);
+      for (let offset = 0; offset < data.length; offset += 4) {
+        data[offset] = r;
+        data[offset + 1] = g;
+        data[offset + 2] = b;
+        data[offset + 3] = 255;
+      }
+      return data;
+    };
+
+    /** 左半分黒・右半分白の合成用サムネイル(扱いやすいコントラスト付き) */
+    const composeThumb = (w: number, h: number): Uint8Array => new Uint8Array(w * h * 4);
+
+    /** ブロックインデックス i に応じて色が変わるメイン画像を生成する */
+    const patternMain = (width: number, height: number): Uint8Array => {
+      const main = new Uint8Array(width * height * 4);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const offset = (y * width + x) * 4;
+          const v = ((x * 7 + y * 13) % 256) as number;
+          main[offset] = v;
+          main[offset + 1] = v;
+          main[offset + 2] = v;
+          main[offset + 3] = 255;
+        }
+      }
+      return main;
+    };
+
+    afterEach(() => {
+      wasm.clear_tiles();
+      wasm.clear_main_image();
+    });
+
+    it('begin_run / step_run で進捗と部分結果が逐次得られ、完了後に export できる', () => {
+      // メイン 96x768(ブロック行 32)/ block 24 → 4x32、row_batch 8 は既定
+      const width = 96;
+      const height = 768;
+      wasm.set_main_image(patternMain(width, height), width, height);
+      wasm.add_tile(1n, featureThumb(120, 120, 120), composeThumb(64, 64), 64, 64);
+
+      wasm.begin_run();
+
+      const events: wasm.JsProgressEvent[] = [];
+      const batches: wasm.JsResultBatch[] = [];
+      let clock = 0;
+      for (;;) {
+        const out = wasm.step_run(++clock * 20);
+        // 取り出し系 getter(take)は 1 回の実行で消費するため、まず変数へ受ける
+        const progress = out.progress;
+        if (progress) events.push(progress);
+        const result = out.result;
+        if (result) batches.push(result);
+        const done = out.done;
+        out.free();
+        if (done) break;
+      }
+
+      // 進捗: マッチング→合成の両フェーズを経由し、最終イベントは 100%
+      expect(events.length).toBeGreaterThan(0);
+      const phases = new Set(events.map((e) => e.phase_code));
+      expect(phases.has('match')).toBe(true);
+      expect(phases.has('compose')).toBe(true);
+      const last = events[events.length - 1];
+      if (!last) return;
+      expect(last.assigned_blocks).toBe(4 * 32);
+      expect(last.overall_ratio).toBeCloseTo(1.0, 5);
+      // 割当済みブロック数は単調増加
+      for (let i = 1; i < events.length; i++) {
+        const prev = events[i - 1];
+        const current = events[i];
+        if (!prev || !current) {
+          continue;
+        }
+        expect(current.assigned_blocks).toBeGreaterThanOrEqual(prev.assigned_blocks);
+      }
+      events.forEach((e) => e.free());
+
+      // 部分結果: 行バッチが行番号昇順で、結合すると export と一致する
+      expect(batches.length).toBe(4); // 32 行 / 8 行
+      let begin = 0;
+      for (const batch of batches) {
+        expect(batch.row_begin).toBe(begin);
+        begin = batch.row_end;
+        expect(batch.block_size).toBe(24);
+        expect(batch.width).toBe(width);
+        expect(batch.rgba.length).toBe(width * (batch.row_end - batch.row_begin) * 24 * 4);
+      }
+      expect(begin).toBe(32);
+
+      const exported = wasm.export_main_image();
+      expect(exported.length).toBe(width * height * 4);
+      let offset = 0;
+      for (const batch of batches) {
+        for (const byte of batch.rgba) {
+          expect(exported[offset]).toBe(byte);
+          offset += 1;
+        }
+        batch.free();
+      }
+      expect(offset).toBe(exported.length);
+    });
+
+    it('cancel はバッチ境界で効き、以降の step はエラーになる', () => {
+      // メイン 96x384(ブロック行 16)→ row_batch 8 で 2 バッチ以上ある
+      const width = 96;
+      const height = 384;
+      const main = patternMain(width, height);
+      wasm.set_main_image(main, width, height);
+      wasm.add_tile(1n, featureThumb(120, 120, 120), composeThumb(64, 64), 64, 64);
+
+      wasm.begin_run();
+      wasm.step_run(0);
+      wasm.step_run(20);
+      wasm.cancel();
+      // 以降の step はエラー(呼び出し側はループを停止する)
+      expect(() => wasm.step_run(40)).toThrow(/run is not started/);
+    });
+
+    it('step_run は run 開始前にはエラーになる', () => {
+      // main image 未設定環境では先にそちらのエラーになるため、双方を受け付ける
+      expect(() => wasm.step_run(0)).toThrow(/run is not started|main image is not set/);
+    });
+
+    it('メイン画像未設定・プール空の begin_run はエラーになる', () => {
+      expect(() => wasm.begin_run()).toThrow(/main image is not set/);
+      wasm.set_main_image(patternMain(24, 24), 24, 24);
+      expect(() => wasm.begin_run()).toThrow(/tile pool is empty/);
     });
   });
 });

@@ -1,11 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  computeGrid,
-  createMockCore,
-  DEFAULT_BLOCK_SIZE,
-  PROGRESS_DEMO_TOTAL_BLOCKS,
-} from './mockCore';
-import type { ProgressEvent, RgbaImage } from './types';
+import { computeGrid, createMockCore, DEFAULT_BLOCK_SIZE } from './mockCore';
+import type { RgbaImage } from './types';
 
 describe('computeGrid(グリッド計算: 詳細設計書 4.2)', () => {
   it('割り切れるサイズでは半端ブロックなし', () => {
@@ -193,55 +188,87 @@ function makeImage(
   return { width, height, data: flatTile(width, height, pixel) };
 }
 
-describe('進捗デモ(進捗コールバック経路: handoff/04 M1)', () => {
+describe('生成(モック: 行バッチ単位 M5)', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it('ダミー処理 1 秒を 16ms 間隔で発火し、全ブロック確定で完了する', async () => {
-    // performance.now も fake 化して runProgressDemo 内の経過時間計算を制御する
+  /** タイル 1 枚を登録済みのコアを生成する */
+  const coreWithTile = (): ReturnType<typeof createMockCore> => {
+    const core = createMockCore();
+    core.setMainImage(makeImage(24, 1200, [10, 20, 30, 255])); // cols=1, rows=50
+    void core.addTile(
+      1n,
+      makeImage(32, 32, [128, 128, 128, 255]),
+      makeImage(64, 64, [0, 0, 0, 255]),
+    );
+    return core;
+  };
+
+  it('run が進捗(match / compose)と行バッチ部分結果を発火する', async () => {
     vi.useFakeTimers({
       toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'],
     });
-    const core = createMockCore();
-    const events: ProgressEvent[] = [];
-    core.onProgress((event) => events.push(event));
+    const core = coreWithTile();
 
-    const done = core.runProgressDemo(1000);
-    await vi.advanceTimersByTimeAsync(1100);
+    const progress: { phase: string; assigned: number }[] = [];
+    const batches: { begin: number; end: number; length: number }[] = [];
+    core.onProgress((event) =>
+      progress.push({ phase: event.phaseCode, assigned: event.assignedBlocks }),
+    );
+    core.onResult((batch) =>
+      batches.push({
+        begin: batch.blockRowBegin,
+        end: batch.blockRowEnd,
+        length: batch.rgba.length,
+      }),
+    );
+
+    const done = core.run();
+    await vi.advanceTimersByTimeAsync(5000);
     await done;
 
-    expect(events.length).toBeGreaterThanOrEqual(50); // 1000ms / 16ms ≈ 62 発火
-    const first = events[0];
-    const last = events.at(-1);
-    expect(first).toBeDefined();
-    expect(last).toBeDefined();
-    if (!first || !last) return;
-    expect(first.phaseCode).toBe('match');
-    expect(first.assignedBlocks).toBe(0);
-    expect(last.phaseCode).toBe('match');
-    expect(last.assignedBlocks).toBe(PROGRESS_DEMO_TOTAL_BLOCKS);
-    expect(last.totalBlocks).toBe(PROGRESS_DEMO_TOTAL_BLOCKS);
-    // フェーズ内進捗は単調増加する
-    for (let i = 1; i < events.length; i++) {
-      const prev = events[i - 1];
-      const current = events[i];
-      if (!prev || !current) continue;
-      expect(current.phaseRatio).toBeGreaterThanOrEqual(prev.phaseRatio);
+    // 進捗: フェーズごとのイベントが届く(match 中は割当数が単調増加)
+    expect(progress.length).toBeGreaterThan(0);
+    expect(progress.some((e) => e.phase === 'match')).toBe(true);
+    expect(progress.some((e) => e.phase === 'compose')).toBe(true);
+    const last = progress.at(-1);
+    if (!last) return;
+    expect(last.assigned).toBe(1 * 50); // cols=1 / rows=50
+
+    // 部分結果: 行を欠かず結合するとメイン画像全体になる(モックは行コピー)
+    expect(batches.length).toBe(Math.ceil(50 / 8));
+    let rows = 0;
+    for (const batch of batches) {
+      expect(batch.begin).toBe(rows);
+      rows = batch.end;
+      // 画素行数 = (end - begin) * blockSize(最終バッチはクリップ)
     }
+    expect(rows).toBe(50);
+    const lastBatch = batches.at(-1);
+    if (!lastBatch) return;
+    // 最終バッチ: ブロック行 48..50 → 画素行 1152..1200(48 行)
+    expect(lastBatch.length).toBe(24 * (50 * 24 - 48 * 24) * 4);
   });
 
-  it('onProgress に登録したコールバックへ進捗が届く', async () => {
+  it('cancel で run が中断し、以降の部分結果が発火しない', async () => {
     vi.useFakeTimers({
       toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'],
     });
-    const core = createMockCore();
-    let received = 0;
-    core.onProgress(() => received++);
+    const core = coreWithTile();
 
-    const done = core.runProgressDemo(320); // 16ms × 20 バッチ
-    await vi.advanceTimersByTimeAsync(500);
+    let batches = 0;
+    core.onResult(() => {
+      batches += 1;
+    });
+
+    const done = core.run();
+    await vi.advanceTimersByTimeAsync(300); // match フェーズ(112ms)を越えて合成に入る
+    core.cancel();
+    const batchesAtCancel = batches;
+    await vi.advanceTimersByTimeAsync(5000);
     await done;
-    expect(received).toBeGreaterThanOrEqual(15);
+    expect(batchesAtCancel).toBeGreaterThan(0);
+    expect(batches).toBe(batchesAtCancel);
   });
 });

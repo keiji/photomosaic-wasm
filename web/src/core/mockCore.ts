@@ -13,6 +13,8 @@ import type {
   MosaicConfig,
   ProgressCallback,
   ProgressEvent,
+  ResultBatch,
+  ResultCallback,
   RgbaImage,
   TileInfo,
 } from './types';
@@ -20,19 +22,11 @@ import type {
 /** ブロックサイズの既定値(詳細設計書 5 章 block_size) */
 export const DEFAULT_BLOCK_SIZE = 24;
 
-/** 進捗デモのダミー総ブロック数(見た目の確認用) */
-export const PROGRESS_DEMO_TOTAL_BLOCKS = 1000;
-
 /** モックのメモリガード上限(詳細設計書 5 章 memory_guard に合わせる) */
 const MOCK_MEMORY_GUARD_BYTES = 512 * 1024 * 1024;
 
-/**
- * モック簡易版の overall_ratio。フェーズ内進捗をそのまま使う
- * (WASM 実装では core の PhasePlan による固定配分・正規化が適用される)。
- */
-function toOverallRatio(ratio: number): number {
-  return ratio;
-}
+/** モックの行バッチ単位(詳細設計書 5 章 row_batch の既定値) */
+const MOCK_ROW_BATCH = 8;
 
 /**
  * TS 側スロットラー(詳細設計書 7.2 と同じ規則: 16ms 以上の経過または 1% 以上の変化)。
@@ -92,7 +86,10 @@ export function createMockCore(): CoreBridge {
   let mainImage: RgbaImage | null = null;
   let currentBlockSize = DEFAULT_BLOCK_SIZE;
   const progressListeners = new Set<ProgressCallback>();
-  let demoTimer: ReturnType<typeof setInterval> | null = null;
+  const resultListeners = new Set<ResultCallback>();
+  /** 進行中の run(キャンセルはバッチ境界で効く。M5 の WASM 実装と同一規則) */
+  let activeRun: { canceled: boolean } | null = null;
+  let runStartedAt = 0;
   // 設定パラメータ(M4): 既定値を保持し、setConfig で差し替える
   let config: MosaicConfig = {
     w_c: 1.0,
@@ -118,6 +115,15 @@ export function createMockCore(): CoreBridge {
       listener(event);
     }
   };
+
+  const emitResult = (batch: ResultBatch): void => {
+    for (const listener of resultListeners) {
+      listener(batch);
+    }
+  };
+
+  /** バッチ境界ごとの待機(UI への制御返し。詳細設計書 8.1 のモック版) */
+  const nextBatch = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 16));
 
   return {
     async getVersion(): Promise<string> {
@@ -176,14 +182,83 @@ export function createMockCore(): CoreBridge {
     },
 
     async run(): Promise<void> {
-      // モックでは合成を行わない(exportImage はメイン画像をそのまま返す)。
-      // コア未完成環境での UI 遷移(GENERATING → DONE)確認用のダミー
+      // モックではモザイク合成を行わず、行バッチ単位の進捗・部分結果
+      // (メイン画像の行コピー)を発火する(コア実装環境での UI 遷移
+      // GENERATING → DONE と進捗表示・部分描画の確認用のダミー)
       if (!mainImage) {
         throw new Error('main image is not set');
       }
       if (tiles.size === 0) {
         throw new Error('tile pool is empty');
       }
+      const grid = computeGrid(mainImage.width, mainImage.height, currentBlockSize);
+      const throttle = new DemoThrottle();
+      const handle = { canceled: false };
+      activeRun = handle;
+      runStartedAt = performance.now();
+
+      const totalBlocks = grid.totalBlocks;
+      // P3 マッチング: 行バッチ単位で進捗を発火(16ms / 1% 規則を模倣)
+      for (let matched = 0; matched < grid.rows; matched += MOCK_ROW_BATCH) {
+        const assignedRows = Math.min(matched + MOCK_ROW_BATCH, grid.rows);
+        if (handle.canceled) {
+          activeRun = null;
+          return;
+        }
+        const ratio = assignedRows / grid.rows;
+        const nowMs = performance.now() - runStartedAt;
+        if (throttle.shouldEmit(nowMs, ratio)) {
+          emit({
+            phaseCode: 'match',
+            phaseRatio: ratio,
+            overallRatio: ratio,
+            assignedBlocks: assignedRows * grid.cols,
+            totalBlocks,
+          });
+        }
+        await nextBatch();
+      }
+      // P4 合成: 行バッチごとに部分結果(メイン画像の行コピー)を発火
+      for (let rowBegin = 0; rowBegin < grid.rows; rowBegin += MOCK_ROW_BATCH) {
+        if (handle.canceled) {
+          activeRun = null;
+          return;
+        }
+        const rowEnd = Math.min(rowBegin + MOCK_ROW_BATCH, grid.rows);
+        const pixelBegin = rowBegin * grid.blockSize;
+        const pixelEnd = Math.min(rowEnd * grid.blockSize, mainImage.height);
+        const bytesPerRow = mainImage.width * 4;
+        const rgba = new Uint8Array(
+          mainImage.data.buffer.slice(pixelBegin * bytesPerRow, pixelEnd * bytesPerRow),
+        );
+        emitResult({
+          blockRowBegin: rowBegin,
+          blockRowEnd: rowEnd,
+          blockSize: grid.blockSize,
+          width: grid.width,
+          rgba,
+        });
+        const ratio = rowEnd / grid.rows;
+        if (throttle.shouldEmit(performance.now() - runStartedAt, ratio)) {
+          emit({
+            phaseCode: 'compose',
+            phaseRatio: ratio,
+            overallRatio: ratio,
+            assignedBlocks: totalBlocks,
+            totalBlocks,
+          });
+        }
+        await nextBatch();
+      }
+      activeRun = null;
+    },
+
+    cancel(): void {
+      if (activeRun === null) {
+        return;
+      }
+      activeRun.canceled = true;
+      activeRun = null;
     },
 
     async getConfig(): Promise<MosaicConfig> {
@@ -277,39 +352,8 @@ export function createMockCore(): CoreBridge {
       progressListeners.add(callback);
     },
 
-    runProgressDemo(durationMs = 1000): Promise<void> {
-      if (demoTimer !== null) {
-        return Promise.resolve(); // 二重起動は無視
-      }
-      const throttle = new DemoThrottle();
-      const totalBlocks = PROGRESS_DEMO_TOTAL_BLOCKS;
-      const start = performance.now();
-      return new Promise<void>((resolve) => {
-        // 16ms 間隔のバッチ境界を模したタイマー(JS がコアの tick を駆動する形。
-        // M5 で「コアがバッチ境界で JS を呼ぶ」本実装に置き換わる)
-        const step = (): void => {
-          const elapsed = performance.now() - start;
-          const ratio = Math.min(1, elapsed / durationMs);
-          if (throttle.shouldEmit(elapsed, ratio)) {
-            emit({
-              phaseCode: 'match',
-              phaseRatio: ratio,
-              overallRatio: toOverallRatio(ratio),
-              assignedBlocks: Math.round(ratio * totalBlocks),
-              totalBlocks,
-            });
-          }
-          if (ratio >= 1) {
-            if (demoTimer !== null) {
-              clearInterval(demoTimer);
-              demoTimer = null;
-            }
-            resolve();
-          }
-        };
-        step(); // 開始時点(0%)を即時に通知する
-        demoTimer = setInterval(step, 16);
-      });
+    onResult(callback: ResultCallback): void {
+      resultListeners.add(callback);
     },
   };
 }

@@ -1,10 +1,13 @@
 /**
  * コア呼び出しラッパ。
  *
- * handoff/04(M2): メイン画像解析(P1)を WASM で行う。
+ * handoff/04 M5: 行バッチ駆動の生成処理(P3 マッチング + P4 合成)を
+ * WASM 経由で行う。
  * - wasm-pack 生成物(web/src/wasm/)を動的ロードする(ロードは 1 回のみ)
  * - ロードに失敗した環境ではモックへフォールバックする(UI 開発をブロックしない)
  * - コアの状態(メイン画像・ブロック特徴量)は WASM 内に保持される
+ * - begin_run / step_run をバッチ境界ごとに呼び出し、進捗(onProgress)と
+ *   部分結果(onResult)をホストに届け、キャンセル(cancel)はバッチ境界で止める
  */
 import { createMockCore } from './mockCore';
 import type {
@@ -13,6 +16,8 @@ import type {
   MosaicConfig,
   ProgressCallback,
   ProgressEvent,
+  ResultBatch,
+  ResultCallback,
   TileInfo,
 } from './types';
 
@@ -87,6 +92,34 @@ async function createWasmCore(): Promise<CoreBridge> {
     }
   };
 
+  const resultListeners = new Set<ResultCallback>();
+  const emitResult = (batch: ResultBatch): void => {
+    for (const listener of resultListeners) {
+      listener(batch);
+    }
+  };
+
+  /**
+   * 進行中の行バッチ駆動ループ(1 run につき 1 つのハンドル)。
+   * cancel() はこのハンドルを介して stepping の継続を止める。
+   * コア(WASM)は 1 バッチを同期的に処理してバッチ境界で JS へ制御を返す
+   * (詳細設計書 8.1)
+   */
+  let activeRun: { canceled: boolean } | null = null;
+
+  /**
+   * 行バッチ境界で UI に制御を返す。
+   * requestAnimationFrame がある環境では描画に合わせて次バッチを再開し、
+   * それ以外(非描画環境)では macrotask 次点で再開する(詳細設計書 8.1)
+   */
+  const scheduleNextBatch = (callback: () => void): void => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => callback());
+    } else {
+      setTimeout(callback, 16);
+    }
+  };
+
   return {
     async getVersion(): Promise<string> {
       return wasm.get_version();
@@ -148,9 +181,80 @@ async function createWasmCore(): Promise<CoreBridge> {
     },
 
     async run(): Promise<void> {
-      // マッチング(P3)+ 合成(P4)をコア内で一括実行する(M4)。
-      // 段階的進捗・部分描画は M5 で導入する
-      wasm.run();
+      // 行バッチ駆動ループ(M5): 1 バッチごとに UI に制御を返し、
+      // 進捗(onProgress)と部分結果(onResult)を届ける。
+      // cancel() 呼び出しでバッチ境界の継続を止める
+      wasm.begin_run();
+      const handle = { canceled: false };
+      activeRun = handle;
+      return new Promise<void>((resolve, reject) => {
+        const drive = (): void => {
+          if (handle.canceled) {
+            activeRun = null;
+            resolve();
+            return;
+          }
+          let out: Awaited<ReturnType<typeof wasm.step_run>>;
+          try {
+            out = wasm.step_run(performance.now());
+          } catch (err) {
+            activeRun = null;
+            reject(err instanceof Error ? err : new Error(String(err)));
+            return;
+          }
+          try {
+            const progress = out.progress;
+            if (progress) {
+              emit({
+                phaseCode: progress.phase_code,
+                phaseRatio: progress.phase_ratio,
+                overallRatio: progress.overall_ratio,
+                assignedBlocks: progress.assigned_blocks,
+                totalBlocks: progress.total_blocks,
+              });
+              progress.free();
+            }
+            const result = out.result;
+            if (result) {
+              emitResult({
+                blockRowBegin: result.row_begin,
+                blockRowEnd: result.row_end,
+                blockSize: result.block_size,
+                width: result.width,
+                // rgba は wasm-bindgen がコピーした新規バッファ。
+                // 部分描画で転写するため参照先はここでは保持しない
+                rgba: result.rgba,
+              });
+              result.free();
+            }
+            const done = out.done;
+            out.free();
+            if (done) {
+              activeRun = null;
+              resolve();
+              return;
+            }
+          } catch (err) {
+            activeRun = null;
+            reject(err instanceof Error ? err : new Error(String(err)));
+            return;
+          }
+          // バッチ境界で JS へ制御を返す(詳細設計書 8.1)
+          scheduleNextBatch(drive);
+        };
+        drive();
+      });
+    },
+
+    cancel(): void {
+      if (activeRun === null) {
+        return;
+      }
+      activeRun.canceled = true;
+      activeRun = null;
+      // コア側もキャンセル状態にしておく(次のバッチを禁止する)。
+      // 既存のマッチ結果・現時点までの合成結果は保持される(詳細設計書 7.5)
+      wasm.cancel();
     },
 
     async getConfig(): Promise<MosaicConfig> {
@@ -177,42 +281,8 @@ async function createWasmCore(): Promise<CoreBridge> {
       progressListeners.add(callback);
     },
 
-    runProgressDemo(durationMs = 1000): Promise<void> {
-      if (durationMs <= 0) {
-        return Promise.resolve();
-      }
-      // コア(Rust)のスロットラーが発火を判定し、発火したバッチだけ UI へ届く。
-      // JS の setInterval はバッチ境界の駆動役(M5 でコア駆動の本実装に置き換わる)
-      const demo = new wasm.ProgressDemo(1000);
-      const start = performance.now();
-      return new Promise<void>((resolve) => {
-        let timer: ReturnType<typeof setInterval> | null = null;
-        const step = (): void => {
-          const elapsed = performance.now() - start;
-          const ratio = Math.min(1, elapsed / durationMs);
-          const event = demo.tick(elapsed, ratio);
-          if (event !== undefined) {
-            emit({
-              phaseCode: event.phase_code,
-              phaseRatio: event.phase_ratio,
-              overallRatio: event.overall_ratio,
-              assignedBlocks: event.assigned_blocks,
-              totalBlocks: event.total_blocks,
-            });
-            event.free();
-          }
-          if (ratio >= 1) {
-            if (timer !== null) {
-              clearInterval(timer);
-              timer = null;
-            }
-            demo.free();
-            resolve();
-          }
-        };
-        step(); // 開始時点(0%)を即時に通知する
-        timer = setInterval(step, 16);
-      });
+    onResult(callback: ResultCallback): void {
+      resultListeners.add(callback);
     },
   };
 }

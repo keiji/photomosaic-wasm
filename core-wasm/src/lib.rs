@@ -10,7 +10,7 @@ use photomosaic_core::grid::{
     compute_block_features, compute_grid_info, BlockFeature, GridInfo, DEFAULT_BLOCK_SIZE,
 };
 use photomosaic_core::pipeline;
-use photomosaic_core::progress::{Phase, PhasePlan, ProgressThrottle};
+use photomosaic_core::progress::ProgressEvent;
 use photomosaic_core::tile::{TileFeature, TilePool};
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
@@ -23,6 +23,8 @@ struct MainImageState {
     features: Vec<BlockFeature>,
     /// P4 合成結果(run 後に設定。exportImage の対象となる)
     composed: Option<Vec<u8>>,
+    /// 進行中の行バッチ実行(M5: begin_run で開始、step_run で駆動)
+    run: Option<pipeline::BatchRunState>,
 }
 
 thread_local! {
@@ -137,6 +139,7 @@ pub fn set_main_image(rgba: Vec<u8>, width: u32, height: u32) -> Result<JsGridIn
             grid,
             features,
             composed: None,
+            run: None,
         });
     });
 
@@ -161,6 +164,8 @@ pub fn set_block_size(px: u32) -> Result<JsGridInfo, JsValue> {
         // ブロックサイズ変更でグリッドが変わるため、既存の合成結果は無効化する
         // (基本設計書 3.3: 全ブロック再マッチ → 再合成。生成は再度 run で行う)
         main.composed = None;
+        // 進行中の行バッチ実行もグリッドと不整合になるため破棄する
+        main.run = None;
         Ok(JsGridInfo::from_grid(main.grid))
     })
 }
@@ -204,28 +209,119 @@ pub fn export_main_image() -> Result<Vec<u8>, JsValue> {
     })
 }
 
-/// フォトモザイクのマッチング(P3)+ 合成(P4)を一括実行する(M4)。
+/// フォトモザイクの P3(マッチング)+ P4(合成)を開始する(M5)。
 ///
 /// - メイン画像未設定・タイルプール空の場合はエラー(詳細設計書 6 章:
 ///   タイルプール空での run は実行せず UI 層で案内する)
-/// - 完了後、`export_main_image` で合成結果を取得できる
-/// - 進捗イベントの発火(バッチごとの JS 制御返し)は M5 で導入する
+/// - 実行は行バッチ(row_batch 行)単位で進む。ホストは [`step_run`] を
+///   完了まで繰り返し呼び出し、バッチ境界で JS へ制御を返して
+///   UI 更新・進捗表示・部分描画を介在させる(詳細設計書 8.1)
+/// - 使用回数 usage は開始時に正規化する(M4 と同一挙動)
+/// - 進行中の別 run があれば破棄して新しく開始する
 #[wasm_bindgen]
-pub fn run() -> Result<(), JsValue> {
+pub fn begin_run() -> Result<(), JsValue> {
+    let has_main = MAIN_IMAGE.with(|cell| cell.borrow().is_some());
+    if !has_main {
+        return Err(js_error("main image is not set"));
+    }
+    let tile_count = TILE_POOL.with(|cell| cell.borrow().tile_count());
+    if tile_count == 0 {
+        return Err(js_error("tile pool is empty"));
+    }
+    TILE_POOL.with(|cell| cell.borrow_mut().reset_usage());
+    MAIN_IMAGE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        if let Some(main) = state.as_mut() {
+            main.run = Some(pipeline::BatchRunState::new(
+                main.grid,
+                &main.features,
+                &main.rgba,
+            ));
+        }
+    });
+    Ok(())
+}
+
+/// フォトモザイクの実行を 1 行バッチぶん進める(M5)。
+///
+/// - `now_ms` はホストの時刻(起点は不問)。コア内部のスロットリング
+///   (16ms 以上または全体進捗 1% 以上の変化で発火。詳細設計書 7.2)に
+///   使用する。ダミー時間を用いた決定性テストには `None` や固定値も渡せる
+/// - 戻り値はこのバッチで発火した進捗イベントと部分結果(行範囲の RGBA)、
+///   および完了フラグ。完了(`done == true`)時は合成結果が内部に確定し、
+///   以降 `export_main_image` で取得できる
+/// - 進行中の run がない場合はエラーになる
+#[wasm_bindgen]
+pub fn step_run(now_ms: Option<f64>) -> Result<JsStepOutput, JsValue> {
     let config = CONFIG.with(|cell| *cell.borrow());
-    TILE_POOL.with(|cell| {
-        let mut pool = cell.borrow_mut();
+    TILE_POOL.with(|pool_cell| {
+        let mut pool = pool_cell.borrow_mut();
         MAIN_IMAGE.with(|image_cell| {
             let mut state = image_cell.borrow_mut();
             let Some(main) = state.as_mut() else {
                 return Err(js_error("main image is not set"));
             };
-            let output = pipeline::run_phases(&main.grid, &main.features, &mut pool, &config)
-                .map_err(|err| js_error(&err))?;
-            main.composed = Some(output.rgba);
-            Ok(())
+            let Some(run) = main.run.as_mut() else {
+                return Err(js_error("run is not started"));
+            };
+            let step = run.step(&mut pool, &config, now_ms);
+            let done = step.done;
+            let canceled = run.is_canceled();
+            let progress = step.progress.map(JsProgressEvent::from_event);
+            let result = step.result.map(JsResultBatch::from_batch);
+            if done {
+                // 完了(またはキャンセル)で内部状態を確定する。
+                // キャンセル時は「現時点までの合成結果」(未完成行はメイン画像)を保持する
+                if let Some(out) = run.take_output() {
+                    main.composed = Some(out);
+                }
+                main.run = None;
+            }
+            Ok(JsStepOutput {
+                done,
+                canceled,
+                progress,
+                result,
+            })
         })
     })
+}
+
+/// フォトモザイクの実行をキャンセルする(詳細設計書 7.5)。
+///
+/// キャンセルはバッチ境界で効く: 実行中の行バッチは完走したうえで停止する。
+/// 既存のマッチ結果と現時点までの合成結果は保持され(exportImage の対象)、
+/// 以降の `step_run` はエラーになる(呼び出し側はループを停止する)
+#[wasm_bindgen]
+pub fn cancel() {
+    MAIN_IMAGE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        if let Some(main) = state.as_mut() {
+            if let Some(mut run) = main.run.take() {
+                run.cancel();
+                if let Some(out) = run.take_output() {
+                    main.composed = Some(out);
+                }
+            }
+        }
+    });
+}
+
+/// フォトモザイクのマッチング(P3)+ 合成(P4)を一括実行する(同期 API)。
+///
+/// 内部では [`begin_run`] + [`step_run`](`None` 時刻)の行バッチ実行を
+/// 完走させ、一括実行経路とバッチ実行経路が同一の結果になることを
+/// 保証する。進捗イベント・部分結果の通知(M5 の主経路)が必要な場合は
+/// begin/step/cancel のペアを使用する
+#[wasm_bindgen]
+pub fn run() -> Result<(), JsValue> {
+    begin_run()?;
+    loop {
+        if step_run(None)?.done {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// 現在の設定(詳細設計書 5 章)を JSON 文字列で返す(詳細設計書 2 章 getConfig)
@@ -316,53 +412,6 @@ pub fn clear_main_image() {
     });
 }
 
-/// 進捗デモ用のスロットル判定(ダミー処理を 16ms 間隔のバッチに区切って進める)。
-///
-/// JS 側のタイマーから現在時刻とダミー処理の進行率を渡すと、コア内の
-/// [`ProgressThrottle`] が「16ms 以上の経過」または「1% 以上の変化」を判定し、
-/// 発火すべきときだけ進捗イベントを返す(発火不要のときは `None`)。
-///
-/// 戻り値は `ResultBatch` の部分ではなく、UI 表示に必要なフィールドのみ。
-#[wasm_bindgen]
-pub struct ProgressDemo {
-    throttle: ProgressThrottle,
-    plan: PhasePlan,
-    total_blocks: u32,
-}
-
-#[wasm_bindgen]
-impl ProgressDemo {
-    /// ダミー処理(M3 相当のマッチング)を想定した進捗デモを初期化する
-    #[wasm_bindgen(constructor)]
-    pub fn new(total_blocks: u32) -> ProgressDemo {
-        ProgressDemo {
-            throttle: ProgressThrottle::new(),
-            plan: PhasePlan::full(),
-            total_blocks,
-        }
-    }
-
-    /// 現在時刻 `now_ms` と進行率 `ratio`(0.0..1.0)を渡し、
-    /// 発火すべきときだけ [`JsProgressEvent`] を返す。
-    #[wasm_bindgen]
-    pub fn tick(&mut self, now_ms: f64, ratio: f32) -> Option<JsProgressEvent> {
-        if !(0.0..=1.0).contains(&ratio) {
-            return None;
-        }
-        if !self.throttle.should_emit(now_ms, ratio) {
-            return None;
-        }
-        let assigned_blocks = (ratio * self.total_blocks as f32).round() as u32;
-        Some(JsProgressEvent {
-            phase_code: Phase::Match.code().to_string(),
-            phase_ratio: ratio,
-            overall_ratio: self.plan.overall_ratio(Phase::Match, ratio),
-            assigned_blocks,
-            total_blocks: self.total_blocks,
-        })
-    }
-}
-
 /// UI 表示用の進捗イベント(文言は持たず、安定識別子 `phase_code` のみ。詳細設計書 7.2)
 #[wasm_bindgen]
 pub struct JsProgressEvent {
@@ -371,6 +420,19 @@ pub struct JsProgressEvent {
     overall_ratio: f32,
     assigned_blocks: u32,
     total_blocks: u32,
+}
+
+impl JsProgressEvent {
+    /// コアの進捗イベントを JS 輸出用へ変換する
+    fn from_event(event: ProgressEvent) -> JsProgressEvent {
+        JsProgressEvent {
+            phase_code: event.phase.code().to_string(),
+            phase_ratio: event.phase_ratio,
+            overall_ratio: event.overall_ratio,
+            assigned_blocks: event.assigned_blocks,
+            total_blocks: event.total_blocks,
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -398,6 +460,102 @@ impl JsProgressEvent {
     #[wasm_bindgen(getter)]
     pub fn total_blocks(&self) -> u32 {
         self.total_blocks
+    }
+}
+
+/// `step_run` 1 バッチ分の JS 輸出。
+///
+/// `progress` / `result` は発火があった場合のみ非 `null`。JS 側は未使用の
+/// イベント・部分結果オブジェクトを `free()` で解放する(寿命管理)
+#[wasm_bindgen]
+pub struct JsStepOutput {
+    done: bool,
+    canceled: bool,
+    progress: Option<JsProgressEvent>,
+    result: Option<JsResultBatch>,
+}
+
+#[wasm_bindgen]
+impl JsStepOutput {
+    /// 実行が完了(またはキャンセル)した
+    #[wasm_bindgen(getter)]
+    pub fn done(&self) -> bool {
+        self.done
+    }
+
+    /// 完了がキャンセルによるもの
+    #[wasm_bindgen(getter)]
+    pub fn canceled(&self) -> bool {
+        self.canceled
+    }
+
+    /// 発火した進捗イベント(onProgress スロットリング済み)。
+    /// 取り出し後は再度取得できない
+    #[wasm_bindgen(getter)]
+    pub fn progress(&mut self) -> Option<JsProgressEvent> {
+        self.progress.take()
+    }
+
+    /// 発火した部分結果(P4 合成バッチ)。取り出し後は再度取得できない
+    #[wasm_bindgen(getter)]
+    pub fn result(&mut self) -> Option<JsResultBatch> {
+        self.result.take()
+    }
+}
+
+/// 部分結果(詳細設計書 3 章 ResultBatch / 7.4 の JS 輸出)。
+///
+/// 行番号はブロック行(row_batch の単位)。画素行への写像は
+/// `row_begin * block_size`。`rgba` は `width * (row_end - row_begin)
+/// * block_size * 4` バイト(下端の半端ブロック行は画像端でクリップ)
+#[wasm_bindgen]
+pub struct JsResultBatch {
+    row_begin: u32,
+    row_end: u32,
+    block_size: u32,
+    width: u32,
+    rgba: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl JsResultBatch {
+    fn from_batch(batch: pipeline::ResultBatch) -> JsResultBatch {
+        JsResultBatch {
+            row_begin: batch.row_begin,
+            row_end: batch.row_end,
+            block_size: batch.block_size,
+            width: batch.width,
+            rgba: batch.rgba,
+        }
+    }
+
+    /// 完成したブロック行範囲 `[row_begin, row_end)`
+    #[wasm_bindgen(getter)]
+    pub fn row_begin(&self) -> u32 {
+        self.row_begin
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn row_end(&self) -> u32 {
+        self.row_end
+    }
+
+    /// 1 ブロック行の高さ px(画素行への写像に使用)
+    #[wasm_bindgen(getter)]
+    pub fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    /// 画像幅 px
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// 合成済み RGBA 行バッファ
+    #[wasm_bindgen(getter)]
+    pub fn rgba(&self) -> Vec<u8> {
+        self.rgba.clone()
     }
 }
 

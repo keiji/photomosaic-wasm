@@ -31,6 +31,65 @@ export class JsProgressEvent {
 }
 
 /**
+ * 部分結果(詳細設計書 3 章 ResultBatch / 7.4 の JS 輸出)。
+ *
+ * 行番号はブロック行(row_batch の単位)。画素行への写像は
+ * `row_begin * block_size`。`rgba` は `width * (row_end - row_begin)
+ * * block_size * 4` バイト(下端の半端ブロック行は画像端でクリップ)
+ */
+export class JsResultBatch {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * 1 ブロック行の高さ px(画素行への写像に使用)
+     */
+    readonly block_size: number;
+    /**
+     * 合成済み RGBA 行バッファ
+     */
+    readonly rgba: Uint8Array;
+    /**
+     * 完成したブロック行範囲 `[row_begin, row_end)`
+     */
+    readonly row_begin: number;
+    readonly row_end: number;
+    /**
+     * 画像幅 px
+     */
+    readonly width: number;
+}
+
+/**
+ * `step_run` 1 バッチ分の JS 輸出。
+ *
+ * `progress` / `result` は発火があった場合のみ非 `null`。JS 側は未使用の
+ * イベント・部分結果オブジェクトを `free()` で解放する(寿命管理)
+ */
+export class JsStepOutput {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * 完了がキャンセルによるもの
+     */
+    readonly canceled: boolean;
+    /**
+     * 実行が完了(またはキャンセル)した
+     */
+    readonly done: boolean;
+    /**
+     * 発火した進捗イベント(onProgress スロットリング済み)。
+     * 取り出し後は再度取得できない
+     */
+    readonly progress: JsProgressEvent | undefined;
+    /**
+     * 発火した部分結果(P4 合成バッチ)。取り出し後は再度取得できない
+     */
+    readonly result: JsResultBatch | undefined;
+}
+
+/**
  * タイル情報(詳細設計書 3 章 TileFeature の JS 輸出)
  */
 export class JsTileInfo {
@@ -52,29 +111,6 @@ export class JsTileInfo {
 }
 
 /**
- * 進捗デモ用のスロットル判定(ダミー処理を 16ms 間隔のバッチに区切って進める)。
- *
- * JS 側のタイマーから現在時刻とダミー処理の進行率を渡すと、コア内の
- * [`ProgressThrottle`] が「16ms 以上の経過」または「1% 以上の変化」を判定し、
- * 発火すべきときだけ進捗イベントを返す(発火不要のときは `None`)。
- *
- * 戻り値は `ResultBatch` の部分ではなく、UI 表示に必要なフィールドのみ。
- */
-export class ProgressDemo {
-    free(): void;
-    [Symbol.dispose](): void;
-    /**
-     * ダミー処理(M3 相当のマッチング)を想定した進捗デモを初期化する
-     */
-    constructor(total_blocks: number);
-    /**
-     * 現在時刻 `now_ms` と進行率 `ratio`(0.0..1.0)を渡し、
-     * 発火すべきときだけ [`JsProgressEvent`] を返す。
-     */
-    tick(now_ms: number, ratio: number): JsProgressEvent | undefined;
-}
-
-/**
  * 値の往復サンプル(handoff/02 検収基準: サンプル関数を JS から呼び値が往復すること)
  */
 export function add(a: number, b: number): number;
@@ -88,6 +124,28 @@ export function add(a: number, b: number): number;
  * - メモリガード超過時はエラーになり、プールは変更されない
  */
 export function add_tile(id: bigint, feature_rgba: Uint8Array, compose_rgba: Uint8Array, compose_w: number, compose_h: number): JsTileInfo;
+
+/**
+ * フォトモザイクの P3(マッチング)+ P4(合成)を開始する(M5)。
+ *
+ * - メイン画像未設定・タイルプール空の場合はエラー(詳細設計書 6 章:
+ *   タイルプール空での run は実行せず UI 層で案内する)
+ * - 実行は行バッチ(row_batch 行)単位で進む。ホストは [`step_run`] を
+ *   完了まで繰り返し呼び出し、バッチ境界で JS へ制御を返して
+ *   UI 更新・進捗表示・部分描画を介在させる(詳細設計書 8.1)
+ * - 使用回数 usage は開始時に正規化する(M4 と同一挙動)
+ * - 進行中の別 run があれば破棄して新しく開始する
+ */
+export function begin_run(): void;
+
+/**
+ * フォトモザイクの実行をキャンセルする(詳細設計書 7.5)。
+ *
+ * キャンセルはバッチ境界で効く: 実行中の行バッチは完走したうえで停止する。
+ * 既存のマッチ結果と現時点までの合成結果は保持され(exportImage の対象)、
+ * 以降の `step_run` はエラーになる(呼び出し側はループを停止する)
+ */
+export function cancel(): void;
 
 /**
  * メイン画像の状態を破棄する(リセット操作に対応。大容量バッファを開放する)
@@ -141,12 +199,12 @@ export function get_version(): string;
 export function remove_tile(id: bigint): void;
 
 /**
- * フォトモザイクのマッチング(P3)+ 合成(P4)を一括実行する(M4)。
+ * フォトモザイクのマッチング(P3)+ 合成(P4)を一括実行する(同期 API)。
  *
- * - メイン画像未設定・タイルプール空の場合はエラー(詳細設計書 6 章:
- *   タイルプール空での run は実行せず UI 層で案内する)
- * - 完了後、`export_main_image` で合成結果を取得できる
- * - 進捗イベントの発火(バッチごとの JS 制御返し)は M5 で導入する
+ * 内部では [`begin_run`] + [`step_run`](`None` 時刻)の行バッチ実行を
+ * 完走させ、一括実行経路とバッチ実行経路が同一の結果になることを
+ * 保証する。進捗イベント・部分結果の通知(M5 の主経路)が必要な場合は
+ * begin/step/cancel のペアを使用する
  */
 export function run(): void;
 
@@ -169,16 +227,32 @@ export function set_config(json: string): void;
  */
 export function set_main_image(rgba: Uint8Array, width: number, height: number): JsGridInfo;
 
+/**
+ * フォトモザイクの実行を 1 行バッチぶん進める(M5)。
+ *
+ * - `now_ms` はホストの時刻(起点は不問)。コア内部のスロットリング
+ *   (16ms 以上または全体進捗 1% 以上の変化で発火。詳細設計書 7.2)に
+ *   使用する。ダミー時間を用いた決定性テストには `None` や固定値も渡せる
+ * - 戻り値はこのバッチで発火した進捗イベントと部分結果(行範囲の RGBA)、
+ *   および完了フラグ。完了(`done == true`)時は合成結果が内部に確定し、
+ *   以降 `export_main_image` で取得できる
+ * - 進行中の run がない場合はエラーになる
+ */
+export function step_run(now_ms?: number | null): JsStepOutput;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_jsgridinfo_free: (a: number, b: number) => void;
     readonly __wbg_jsprogressevent_free: (a: number, b: number) => void;
+    readonly __wbg_jsresultbatch_free: (a: number, b: number) => void;
+    readonly __wbg_jsstepoutput_free: (a: number, b: number) => void;
     readonly __wbg_jstileinfo_free: (a: number, b: number) => void;
-    readonly __wbg_progressdemo_free: (a: number, b: number) => void;
     readonly add: (a: number, b: number) => number;
     readonly add_tile: (a: number, b: bigint, c: number, d: number, e: number, f: number, g: number, h: number) => void;
+    readonly begin_run: (a: number) => void;
+    readonly cancel: () => void;
     readonly clear_main_image: () => void;
     readonly clear_tiles: () => void;
     readonly export_main_image: (a: number) => void;
@@ -198,19 +272,27 @@ export interface InitOutput {
     readonly jsprogressevent_phase_code: (a: number, b: number) => void;
     readonly jsprogressevent_phase_ratio: (a: number) => number;
     readonly jsprogressevent_total_blocks: (a: number) => number;
+    readonly jsresultbatch_block_size: (a: number) => number;
+    readonly jsresultbatch_rgba: (a: number, b: number) => void;
+    readonly jsresultbatch_row_begin: (a: number) => number;
+    readonly jsresultbatch_row_end: (a: number) => number;
+    readonly jsresultbatch_width: (a: number) => number;
+    readonly jsstepoutput_canceled: (a: number) => number;
+    readonly jsstepoutput_done: (a: number) => number;
+    readonly jsstepoutput_progress: (a: number) => number;
+    readonly jsstepoutput_result: (a: number) => number;
     readonly jstileinfo_detail: (a: number) => number;
     readonly jstileinfo_id: (a: number) => bigint;
     readonly jstileinfo_mean_lab: (a: number, b: number) => void;
     readonly jstileinfo_thumb_h: (a: number) => number;
     readonly jstileinfo_thumb_w: (a: number) => number;
     readonly jstileinfo_usage: (a: number) => number;
-    readonly progressdemo_new: (a: number) => number;
-    readonly progressdemo_tick: (a: number, b: number, c: number) => number;
     readonly remove_tile: (a: number, b: bigint) => void;
     readonly run: (a: number) => void;
     readonly set_block_size: (a: number, b: number) => void;
     readonly set_config: (a: number, b: number, c: number) => void;
     readonly set_main_image: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly step_run: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;

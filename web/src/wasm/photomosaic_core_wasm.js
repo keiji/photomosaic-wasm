@@ -136,6 +136,140 @@ export class JsProgressEvent {
 if (Symbol.dispose) JsProgressEvent.prototype[Symbol.dispose] = JsProgressEvent.prototype.free;
 
 /**
+ * 部分結果(詳細設計書 3 章 ResultBatch / 7.4 の JS 輸出)。
+ *
+ * 行番号はブロック行(row_batch の単位)。画素行への写像は
+ * `row_begin * block_size`。`rgba` は `width * (row_end - row_begin)
+ * * block_size * 4` バイト(下端の半端ブロック行は画像端でクリップ)
+ */
+export class JsResultBatch {
+    static __wrap(ptr) {
+        const obj = Object.create(JsResultBatch.prototype);
+        obj.__wbg_ptr = ptr;
+        JsResultBatchFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        JsResultBatchFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_jsresultbatch_free(ptr, 0);
+    }
+    /**
+     * 1 ブロック行の高さ px(画素行への写像に使用)
+     * @returns {number}
+     */
+    get block_size() {
+        const ret = wasm.jsresultbatch_block_size(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * 合成済み RGBA 行バッファ
+     * @returns {Uint8Array}
+     */
+    get rgba() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.jsresultbatch_rgba(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * 完成したブロック行範囲 `[row_begin, row_end)`
+     * @returns {number}
+     */
+    get row_begin() {
+        const ret = wasm.jsresultbatch_row_begin(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get row_end() {
+        const ret = wasm.jsresultbatch_row_end(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * 画像幅 px
+     * @returns {number}
+     */
+    get width() {
+        const ret = wasm.jsresultbatch_width(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) JsResultBatch.prototype[Symbol.dispose] = JsResultBatch.prototype.free;
+
+/**
+ * `step_run` 1 バッチ分の JS 輸出。
+ *
+ * `progress` / `result` は発火があった場合のみ非 `null`。JS 側は未使用の
+ * イベント・部分結果オブジェクトを `free()` で解放する(寿命管理)
+ */
+export class JsStepOutput {
+    static __wrap(ptr) {
+        const obj = Object.create(JsStepOutput.prototype);
+        obj.__wbg_ptr = ptr;
+        JsStepOutputFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        JsStepOutputFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_jsstepoutput_free(ptr, 0);
+    }
+    /**
+     * 完了がキャンセルによるもの
+     * @returns {boolean}
+     */
+    get canceled() {
+        const ret = wasm.jsstepoutput_canceled(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * 実行が完了(またはキャンセル)した
+     * @returns {boolean}
+     */
+    get done() {
+        const ret = wasm.jsstepoutput_done(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * 発火した進捗イベント(onProgress スロットリング済み)。
+     * 取り出し後は再度取得できない
+     * @returns {JsProgressEvent | undefined}
+     */
+    get progress() {
+        const ret = wasm.jsstepoutput_progress(this.__wbg_ptr);
+        return ret === 0 ? undefined : JsProgressEvent.__wrap(ret);
+    }
+    /**
+     * 発火した部分結果(P4 合成バッチ)。取り出し後は再度取得できない
+     * @returns {JsResultBatch | undefined}
+     */
+    get result() {
+        const ret = wasm.jsstepoutput_result(this.__wbg_ptr);
+        return ret === 0 ? undefined : JsResultBatch.__wrap(ret);
+    }
+}
+if (Symbol.dispose) JsStepOutput.prototype[Symbol.dispose] = JsStepOutput.prototype.free;
+
+/**
  * タイル情報(詳細設計書 3 章 TileFeature の JS 輸出)
  */
 export class JsTileInfo {
@@ -212,50 +346,6 @@ export class JsTileInfo {
 if (Symbol.dispose) JsTileInfo.prototype[Symbol.dispose] = JsTileInfo.prototype.free;
 
 /**
- * 進捗デモ用のスロットル判定(ダミー処理を 16ms 間隔のバッチに区切って進める)。
- *
- * JS 側のタイマーから現在時刻とダミー処理の進行率を渡すと、コア内の
- * [`ProgressThrottle`] が「16ms 以上の経過」または「1% 以上の変化」を判定し、
- * 発火すべきときだけ進捗イベントを返す(発火不要のときは `None`)。
- *
- * 戻り値は `ResultBatch` の部分ではなく、UI 表示に必要なフィールドのみ。
- */
-export class ProgressDemo {
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        ProgressDemoFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_progressdemo_free(ptr, 0);
-    }
-    /**
-     * ダミー処理(M3 相当のマッチング)を想定した進捗デモを初期化する
-     * @param {number} total_blocks
-     */
-    constructor(total_blocks) {
-        const ret = wasm.progressdemo_new(total_blocks);
-        this.__wbg_ptr = ret;
-        ProgressDemoFinalization.register(this, this.__wbg_ptr, this);
-        return this;
-    }
-    /**
-     * 現在時刻 `now_ms` と進行率 `ratio`(0.0..1.0)を渡し、
-     * 発火すべきときだけ [`JsProgressEvent`] を返す。
-     * @param {number} now_ms
-     * @param {number} ratio
-     * @returns {JsProgressEvent | undefined}
-     */
-    tick(now_ms, ratio) {
-        const ret = wasm.progressdemo_tick(this.__wbg_ptr, now_ms, ratio);
-        return ret === 0 ? undefined : JsProgressEvent.__wrap(ret);
-    }
-}
-if (Symbol.dispose) ProgressDemo.prototype[Symbol.dispose] = ProgressDemo.prototype.free;
-
-/**
  * 値の往復サンプル(handoff/02 検収基準: サンプル関数を JS から呼び値が往復すること)
  * @param {number} a
  * @param {number} b
@@ -298,6 +388,42 @@ export function add_tile(id, feature_rgba, compose_rgba, compose_w, compose_h) {
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
+}
+
+/**
+ * フォトモザイクの P3(マッチング)+ P4(合成)を開始する(M5)。
+ *
+ * - メイン画像未設定・タイルプール空の場合はエラー(詳細設計書 6 章:
+ *   タイルプール空での run は実行せず UI 層で案内する)
+ * - 実行は行バッチ(row_batch 行)単位で進む。ホストは [`step_run`] を
+ *   完了まで繰り返し呼び出し、バッチ境界で JS へ制御を返して
+ *   UI 更新・進捗表示・部分描画を介在させる(詳細設計書 8.1)
+ * - 使用回数 usage は開始時に正規化する(M4 と同一挙動)
+ * - 進行中の別 run があれば破棄して新しく開始する
+ */
+export function begin_run() {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.begin_run(retptr);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        if (r1) {
+            throw takeObject(r0);
+        }
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * フォトモザイクの実行をキャンセルする(詳細設計書 7.5)。
+ *
+ * キャンセルはバッチ境界で効く: 実行中の行バッチは完走したうえで停止する。
+ * 既存のマッチ結果と現時点までの合成結果は保持され(exportImage の対象)、
+ * 以降の `step_run` はエラーになる(呼び出し側はループを停止する)
+ */
+export function cancel() {
+    wasm.cancel();
 }
 
 /**
@@ -453,12 +579,12 @@ export function remove_tile(id) {
 }
 
 /**
- * フォトモザイクのマッチング(P3)+ 合成(P4)を一括実行する(M4)。
+ * フォトモザイクのマッチング(P3)+ 合成(P4)を一括実行する(同期 API)。
  *
- * - メイン画像未設定・タイルプール空の場合はエラー(詳細設計書 6 章:
- *   タイルプール空での run は実行せず UI 層で案内する)
- * - 完了後、`export_main_image` で合成結果を取得できる
- * - 進捗イベントの発火(バッチごとの JS 制御返し)は M5 で導入する
+ * 内部では [`begin_run`] + [`step_run`](`None` 時刻)の行バッチ実行を
+ * 完走させ、一括実行経路とバッチ実行経路が同一の結果になることを
+ * 保証する。進捗イベント・部分結果の通知(M5 の主経路)が必要な場合は
+ * begin/step/cancel のペアを使用する
  */
 export function run() {
     try {
@@ -543,6 +669,35 @@ export function set_main_image(rgba, width, height) {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
 }
+
+/**
+ * フォトモザイクの実行を 1 行バッチぶん進める(M5)。
+ *
+ * - `now_ms` はホストの時刻(起点は不問)。コア内部のスロットリング
+ *   (16ms 以上または全体進捗 1% 以上の変化で発火。詳細設計書 7.2)に
+ *   使用する。ダミー時間を用いた決定性テストには `None` や固定値も渡せる
+ * - 戻り値はこのバッチで発火した進捗イベントと部分結果(行範囲の RGBA)、
+ *   および完了フラグ。完了(`done == true`)時は合成結果が内部に確定し、
+ *   以降 `export_main_image` で取得できる
+ * - 進行中の run がない場合はエラーになる
+ * @param {number | null} [now_ms]
+ * @returns {JsStepOutput}
+ */
+export function step_run(now_ms) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.step_run(retptr, !isLikeNone(now_ms), isLikeNone(now_ms) ? 0 : now_ms);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return JsStepOutput.__wrap(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -613,12 +768,15 @@ const JsGridInfoFinalization = (typeof FinalizationRegistry === 'undefined')
 const JsProgressEventFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_jsprogressevent_free(ptr, 1));
+const JsResultBatchFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_jsresultbatch_free(ptr, 1));
+const JsStepOutputFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_jsstepoutput_free(ptr, 1));
 const JsTileInfoFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_jstileinfo_free(ptr, 1));
-const ProgressDemoFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_progressdemo_free(ptr, 1));
 
 function addHeapObject(obj) {
     if (heap_next === heap.length) heap.push(heap.length + 1);

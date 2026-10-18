@@ -54,6 +54,9 @@ pub fn distance(
 
 /// 全ブロックをマッチングする(P3)。
 ///
+/// 範囲 `[0, 全ブロック数)` の [`match_block_range`] と同一の結果を返す
+/// (行バッチ実装 M5 とは別に一括実行を残す。決定性は走査順で保証するため等価)。
+///
 /// - `cols` は隣接参照(直上 = block_index - cols、直左 = block_index - 1)に使用
 /// - 選択タイルの使用回数を [`TilePool`] 側で加算する
 /// - タイルプールが空の場合は空の結果を返す(タイル 0 枚の run は UI 層で案内する)
@@ -63,15 +66,46 @@ pub fn match_blocks(
     pool: &mut TilePool,
     config: &MosaicConfig,
 ) -> Vec<MatchResult> {
-    let mut results: Vec<MatchResult> = Vec::with_capacity(blocks.len());
+    let mut assigned: Vec<u64> = Vec::with_capacity(blocks.len());
+    match_block_range(blocks, cols, pool, config, &mut assigned, 0, blocks.len())
+}
+
+/// ブロック範囲 `[block_begin, block_end)` をマッチングする(P3 の行バッチ実行)。
+///
+/// - `assigned` は `[0, block_begin)` の確定済み割当(タイル ID)を保持するバッファ。
+///   直上・直左の同一タイル判定に使い、本関数が選択した分を末尾へ push する
+///   (手前のバッチで確定した割当を隣接参照に利用するため。M5 の行バッチ化)
+/// - 走査順は「ブロック番号昇順 × タイル ID 昇順」に固定し、同一入力に対して
+///   決定的な結果を保証する(handoff/02 4 章の決定性指針)
+/// - 返す [`MatchResult`] の `block_index` は画像全体での番号(行優先)
+/// - タイルプールが空または `cols == 0` の場合は空の結果を返す
+pub fn match_block_range(
+    blocks: &[BlockFeature],
+    cols: u32,
+    pool: &mut TilePool,
+    config: &MosaicConfig,
+    assigned: &mut Vec<u64>,
+    block_begin: usize,
+    block_end: usize,
+) -> Vec<MatchResult> {
+    let mut results: Vec<MatchResult> = Vec::new();
     if pool.tile_count() == 0 || cols == 0 {
         return results;
     }
+    let block_begin = block_begin.min(block_end.min(blocks.len()));
+    let block_end = block_end.min(blocks.len());
+    // 呼び出し側の取り違え検知: 接頭辞と開始位置が一致しない場合は実行しない
+    // (隣接参照の履歴が不完全なまま走査するのを避ける防御)
+    if assigned.len() != block_begin {
+        return results;
+    }
 
-    // 選択済み割当(位置 i のタイル ID)。直上・直左の同一タイル判定に使う
-    let mut assigned: Vec<u64> = Vec::with_capacity(blocks.len());
-
-    for (i, block) in blocks.iter().enumerate() {
+    for (i, block) in blocks
+        .iter()
+        .enumerate()
+        .skip(block_begin)
+        .take(block_end - block_begin)
+    {
         // 全タイルの使用回数が usage_cap に達したら一括リセット(スタック防止)
         if pool.all_usage_reached(config.usage_cap) {
             pool.reset_usage();
@@ -258,7 +292,7 @@ mod tests {
         // リセットが機能している: どのタイルの usage も cap(1)+α を超えない
         for id in [1_u64, 2] {
             assert!(
-                pool.feature(id).map_or(false, |f| f.usage <= 1),
+                pool.feature(id).is_some_and(|f| f.usage <= 1),
                 "usage must be capped"
             );
         }
@@ -278,7 +312,7 @@ mod tests {
         let results = match_blocks(&blocks, 1, &mut pool, &config);
         assert_eq!(results.len(), 10);
         // usage は加算が続く(usage も all_usage_reached は常に false)
-        assert!(pool.feature(1).map_or(false, |f| f.usage >= 10));
+        assert!(pool.feature(1).is_some_and(|f| f.usage >= 10));
     }
 
     #[test]
@@ -359,6 +393,95 @@ mod tests {
         let config = MosaicConfig::default();
         let results = match_blocks(&blocks, 4, &mut pool, &config);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn match_block_range_full_range_equals_match_blocks() {
+        let target: [f32; 3] = [50.0, 1.0, 2.0];
+        let tiles = [
+            ([51.0, 1.0, 2.0], 3.0, 1),
+            ([52.0, -1.0, 3.0], 4.0, 2),
+            ([53.0, 2.0, -2.0], 5.0, 3),
+        ];
+        let blocks = uniform_blocks(target, 4.0, 12);
+        let config = MosaicConfig::default();
+
+        let whole = {
+            let mut pool = pool_with_tiles(&tiles);
+            match_blocks(&blocks, 4, &mut pool, &config)
+        };
+        let ranged = {
+            let mut pool = pool_with_tiles(&tiles);
+            let mut assigned = Vec::new();
+            match_block_range(
+                &blocks,
+                4,
+                &mut pool,
+                &config,
+                &mut assigned,
+                0,
+                blocks.len(),
+            )
+        };
+        assert_eq!(whole, ranged);
+        assert_eq!(ranged.len(), blocks.len());
+        for (i, result) in ranged.iter().enumerate() {
+            assert_eq!(result.block_index, i as u32);
+        }
+    }
+
+    #[test]
+    fn match_block_range_resumes_with_neighbor_history() {
+        // 行バッチ化(M5): 全体一括と「行ごとの分割」が同一結果になること。
+        // cols=4 / 4 行 = 16 ブロックを 1 行ずつ(4 回)に分けて実行する
+        let target: [f32; 3] = [50.0, 0.5, -0.5];
+        let tiles = [
+            ([50.5, 0.0, 0.0], 1.0, 1),
+            ([50.0, 1.0, -1.0], 0.5, 2),
+            ([51.5, -2.0, 2.0], 2.0, 3),
+        ];
+        let blocks = uniform_blocks(target, 2.0, 16);
+        let cols = 4_u32;
+        let config = MosaicConfig::default();
+
+        let whole = {
+            let mut pool = pool_with_tiles(&tiles);
+            match_blocks(&blocks, cols, &mut pool, &config)
+        };
+        let mut pool = pool_with_tiles(&tiles);
+        let mut assigned: Vec<u64> = Vec::new();
+        let mut batched: Vec<MatchResult> = Vec::new();
+        let mut pos = 0_usize;
+        while pos < blocks.len() {
+            let end = (pos + cols as usize).min(blocks.len());
+            batched.extend(match_block_range(
+                &blocks,
+                cols,
+                &mut pool,
+                &config,
+                &mut assigned,
+                pos,
+                end,
+            ));
+            pos = end;
+        }
+        assert_eq!(whole, batched, "row batch must not change match results");
+    }
+
+    #[test]
+    fn match_block_range_out_of_bounds_is_clamped() {
+        let blocks = uniform_blocks([50.0, 0.0, 0.0], 0.0, 4);
+        let mut pool = pool_with_tiles(&[([50.5, 0.0, 0.0], 0.0, 1)]);
+        let config = MosaicConfig::default();
+        // 範囲が窓外(開始 > 終了、block_end > 全体)でも安全にクランプされる
+        let mut assigned = Vec::new();
+        let results = match_block_range(&blocks, 2, &mut pool, &config, &mut assigned, 4, 10);
+        assert!(results.is_empty());
+        assert!(assigned.is_empty());
+        let mut assigned = Vec::new();
+        let results = match_block_range(&blocks, 2, &mut pool, &config, &mut assigned, 0, 100);
+        assert_eq!(results.len(), 4);
+        assert_eq!(assigned.len(), 4);
     }
 
     #[test]

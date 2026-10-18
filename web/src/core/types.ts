@@ -49,6 +49,26 @@ export interface ProgressEvent {
 export type ProgressCallback = (event: ProgressEvent) => void;
 
 /**
+ * 部分結果(詳細設計書 3 章 ResultBatch / 7.4)。
+ * 行番号はブロック行(row_batch の単位)。画素行への写像は rowBegin * blockSize。
+ * 完成した行範囲をプレビューへ逐次転写する(段階的置き換え表示)に使う。
+ */
+export interface ResultBatch {
+  /** 完成したブロック行範囲 `[blockRowBegin, blockRowEnd)` */
+  blockRowBegin: number;
+  blockRowEnd: number;
+  /** 1 ブロック行の高さ px(画素行 = blockRowBegin * blockSize) */
+  blockSize: number;
+  /** 画像幅 px */
+  width: number;
+  /** width * (blockRowEnd - blockRowBegin) * blockSize * 4 バイトの合成済み RGBA */
+  rgba: Uint8Array;
+}
+
+/** 部分結果のコールバック(onResult で登録する) */
+export type ResultCallback = (batch: ResultBatch) => void;
+
+/**
  * マッチング・合成のパラメータ(詳細設計書 5 章)。
  * キー名はコア(getConfig/setConfig の JSON)と一致させる。
  */
@@ -126,23 +146,23 @@ export interface CoreBridge {
   /** メイン画像の状態を破棄する(リセット。コア内の大容量バッファを開放) */
   clearMainImage(): void;
   /**
-   * マッチング(P3)+ 合成(P4)を一括実行する(M4)。
+   * マッチング(P3)+ 合成(P4)を実行する(M5)。
+   * 処理は行バッチ単位で進み、バッチ境界ごとに UI へ制御を返したうえで
+   * 進捗(onProgress)と部分結果(onResult)を発火する。
    * メイン画像未設定・タイルプール空の場合は例外。完了後 exportImage で
-   * 合成結果を取得できる。段階的進捗(onProgress/onResult)は M5 で導入
+   * 合成結果を取得できる
    */
   run(): Promise<void>;
+  /** 実行中の生成処理をキャンセルする(バッチ境界で停止。現時点までの合成結果は保持) */
+  cancel(): void;
   /** 現在の設定パラメータを取得する(詳細設計書 5 章) */
   getConfig(): Promise<MosaicConfig>;
   /** 設定パラメータを上書きする(範囲外は例外) */
   setConfig(config: MosaicConfig): Promise<void>;
   /** 完成画像(または現時点までの合成結果)の RGBA を取得する(P5 のエンコード前段) */
   exportImage(): Promise<RgbaImage>;
-  /** 進捗イベント受け取り登録(M5 でコア駆動の発火に置き換わる) */
+  /** 進捗イベント受け取り登録(スロットリングはコアが行う。詳細設計書 7.2) */
   onProgress(callback: ProgressCallback): void;
-  /**
-   * 進捗デモ(M1 検証用): ダミー処理を 16ms 間隔のバッチに区切り、
-   * コアのスロットル規則(16ms / 1%)に従って進捗イベントを発火する。
-   * M5 で実物の進捗(onResult / cancel 付き)に置き換わる。
-   */
-  runProgressDemo(durationMs?: number): Promise<void>;
+  /** 部分結果(行バッチ単位の合成済み行)受け取り登録(詳細設計書 7.4) */
+  onResult(callback: ResultCallback): void;
 }

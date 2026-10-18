@@ -5,7 +5,7 @@
  * 平均色はコア(P1)が算出した特徴量(mean_lab)を sRGB へ逆変換したもので、
  * bridge 経由で受け取る。UI 層はコア算出値を描画するだけで計算を担わない。
  */
-import type { GridInfo, RgbaImage } from '../core/types';
+import type { GridInfo, ResultBatch, RgbaImage } from '../core/types';
 
 /** グリッド線の色(dark/light 両方で視認できる中間トーン) */
 const GRID_LINE_COLOR = 'rgba(255, 255, 255, 0.6)';
@@ -76,5 +76,27 @@ export class Preview {
     this.canvas.height = image.height;
     this.ctx.imageSmoothingEnabled = false;
     this.ctx.putImageData(new ImageData(image.data, image.width, image.height), 0, 0);
+  }
+
+  /**
+   * 行バッチの部分結果をプレビューに転写する(M5: 詳細設計書 7.4)。
+   *
+   * キャンバスは生成開始時にグリッド表示で所定サイズに設定済みであること。
+   * 受信した行範囲(画素行起点 = blockRowBegin * blockSize)のみを
+   * putImageData で上書きし、他の領域(未合成行のグリッド表示)は保持する。
+   *
+   * `batch` は bridge の onResult ハンドラへ届く値。
+   */
+  drawResultBatch(batch: ResultBatch): void {
+    const pixelBegin = batch.blockRowBegin * batch.blockSize;
+    const pixelEnd = Math.min(batch.blockRowEnd * batch.blockSize, this.canvas.height);
+    const height = pixelEnd - pixelBegin;
+    if (height <= 0 || batch.width !== this.canvas.width) {
+      return;
+    }
+    // putImageData 用に Uint8ClampedArray へ複製する(生成物のバッファ寿命を分離)
+    const data = new Uint8ClampedArray(batch.width * height * 4);
+    data.set(batch.rgba.subarray(0, data.length));
+    this.ctx.putImageData(new ImageData(data, batch.width, height), 0, pixelBegin);
   }
 }

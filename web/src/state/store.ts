@@ -20,6 +20,8 @@ export type AppEvent =
   | { type: 'GENERATION_INVALIDATED' }
   /** 生成処理が失敗した(エラーを表示して再生成待ちへ戻す) */
   | { type: 'GENERATION_FAILED' }
+  /** 生成処理がキャンセルされた(バッチ境界で停止。再生成待ちへ戻す。M5) */
+  | { type: 'GENERATION_CANCELED' }
   | { type: 'RESET' };
 
 /**
@@ -65,6 +67,10 @@ export function transition(state: AppState, event: AppEvent): AppState {
       return state === 'DONE' ? 'MAIN_READY' : state;
     case 'GENERATION_FAILED':
       // 失敗した生成は打ち切り。エラー表示後に再生成待ち(MAIN_READY)へ戻る
+      return state === 'GENERATING' ? 'MAIN_READY' : state;
+    case 'GENERATION_CANCELED':
+      // キャンセル: バッチ境界で処理を止め、再生成待ち(MAIN_READY)へ戻る。
+      // 部分描画はコア側の現時点までの合成結果として保持される(詳細設計書 7.5)
       return state === 'GENERATING' ? 'MAIN_READY' : state;
     case 'RESET':
       // リセット: 全状態クリア → S1 へ

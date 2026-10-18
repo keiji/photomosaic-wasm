@@ -9,6 +9,7 @@ import './style.css';
 import { InvalidFileError, loadMainImage, loadTile } from './io/imageLoader';
 import { buildDownloadFilename, downloadBlob, encodePng } from './io/exporter';
 import { createCoreBridge, getCoreImplementation } from './core/bridge';
+import type { GridInfo } from './core/types';
 import { AppStore } from './state/store';
 import type { AppStoreData } from './state/store';
 import { messages, phaseLabelFor } from './i18n/messages';
@@ -42,6 +43,7 @@ function applyMessages(): void {
   requireElement<HTMLElement>('#block-size-label').textContent = messages.blockSizeLabel;
   requireElement<HTMLElement>('#tile-drop-hint-edit').textContent = messages.tileDropHintEdit;
   requireElement<HTMLButtonElement>('#generate-button').textContent = messages.generate;
+  requireElement<HTMLButtonElement>('#cancel-button').textContent = messages.cancel;
   requireElement<HTMLElement>('#tiles-required-hint').textContent = messages.tilesRequiredHint;
   requireElement<HTMLCanvasElement>('#preview-canvas').setAttribute(
     'aria-label',
@@ -72,27 +74,21 @@ async function main(): Promise<void> {
   const progress = new ProgressPanel(requireElement<HTMLElement>('#progress-section'));
   const controls = new Controls(screenEdit);
 
-  // --- 進捗イベントの受信(WASM 経由。bridge が登録したコールバックへ届く) ---
+  // 直近のグリッド情報(メイン画像解析・ブロックサイズ変更の戻り値。
+  // 生成開始時のプレビュー再描画に使用する)
+  let currentGrid: GridInfo | null = null;
+
+  // --- 進捗イベントの受信(M5: コア駆動・スロットリング済み) ---
   core.onProgress((event) => {
     progress.setCounts(event.assignedBlocks, event.totalBlocks);
     progress.setPhase(phaseLabelFor(event.phaseCode));
+    // ストアの進捗も同期させる(render 経由で進捗表示が一貫する)
+    store.setBlockCounts(event.totalBlocks, event.assignedBlocks);
   });
 
-  // --- 進捗デモ(M1 検証用): ダミー処理 1 秒を 16ms 間隔のバッチで進める ---
-  const demoButton = requireElement<HTMLButtonElement>('#progress-demo');
-  demoButton.textContent = messages.progressDemo;
-  demoButton.addEventListener('click', async () => {
-    if (demoButton.disabled) return;
-    demoButton.disabled = true;
-    progress.setPhase(phaseLabelFor('match'));
-    try {
-      await core.runProgressDemo(1000);
-    } catch (err) {
-      console.error('progress demo failed', err);
-      progress.reset();
-    } finally {
-      demoButton.disabled = false;
-    }
+  // --- 部分結果の受信(M5: 行バッチ単位の逐次転写) ---
+  core.onResult((batch) => {
+    preview.drawResultBatch(batch);
   });
 
   const showError = (message: string): void => {
@@ -123,6 +119,9 @@ async function main(): Promise<void> {
     controls.setGenerateEnabled(canGenerate);
     tilesRequiredHint.hidden = !inEdit || data.tileCount > 0;
 
+    // キャンセルボタン: 生成処理中のみ表示(M5)
+    controls.setCancelVisible(data.state === 'GENERATING');
+
     // タイル一覧は S1(TILES_READY 含む)/S2 の両方で操作できるよう表示位置を移動する
     tileList.attachTo(inEdit ? tileListEditContainer : tileListStartContainer);
 
@@ -151,9 +150,14 @@ async function main(): Promise<void> {
         const grid = await core.setMainImage(image);
         store.dispatch({ type: 'MAIN_IMAGE_SET' });
         store.setBlockCounts(grid.totalBlocks, 0);
+        currentGrid = grid;
         // プレビューはコア算出のブロック平均色(P1 特徴量)で描画する
         preview.drawGrid(grid, core.getBlockMeanColors());
         progress.setPhase(messages.phaseMainAnalyze);
+        // TILES_READY からメイン画像を設定すると自動開始(基本設計書 1.4)
+        if (store.getData().state === 'GENERATING') {
+          await startGeneration();
+        }
       } catch (err) {
         if (err instanceof InvalidFileError) {
           showError(messages.errorInvalidFile);
@@ -270,9 +274,18 @@ async function main(): Promise<void> {
 
   // --- S2: ブロックサイズ変更(300ms デバウンス後にグリッド再計算) ---
   controls.handleBlockSizeChange(async (px) => {
+    // 生成中の変更は M6 の差分再マッチで発展させる(M5: 実行中の生成をキャンセル)。
+    // 詳細設計書 7.5: 無駄な再計算をバッチ境界で中止する
+    if (store.getData().state === 'GENERATING') {
+      generation += 1;
+      core.cancel();
+      store.dispatch({ type: 'GENERATION_CANCELED' });
+      progress.setPhase(messages.canceledDone);
+    }
     try {
       const grid = await core.setBlockSize(px);
       store.setBlockCounts(grid.totalBlocks, 0);
+      currentGrid = grid;
       preview.drawGrid(grid, core.getBlockMeanColors());
       // 完成済みの合成結果はグリッドの再計算で無効になる(コア側で composed を破棄)。
       // 再生成は生成ボタンで行う(M4。M6 で自動再生成に拡張)
@@ -283,32 +296,58 @@ async function main(): Promise<void> {
     }
   });
 
-  // --- S2: フォトモザイクの生成(M4: P3 マッチング + P4 合成の中)。一括実行 ---
-  controls.handleGenerate(async () => {
+  // --- S2: フォトモザイクの生成(M5: 行バッチ駆動・進捗・部分描画) ---
+  // 実行世代: キャンセルで +1 し、完了コールバックが最新世代のものだけを反映する
+  let generation = 0;
+
+  const startGeneration = async (): Promise<void> => {
     clearError();
-    demoButton.disabled = true; // 進捗デモと同時実行しない
-    controls.setGenerateEnabled(false);
+    if (currentGrid === null) {
+      return;
+    }
+    // 生成開始: プレビューをいったんグリッド表示(平均色)へ戻し、
+    // 完了した行バッチから順にフォトモザイクへ置き換わる(基本設計書 2.2)
+    preview.drawGrid(currentGrid, core.getBlockMeanColors());
     store.dispatch({ type: 'GENERATION_STARTED' });
-    progress.setCounts(0, store.getData().totalBlocks ?? 0);
-    progress.setPhase(phaseLabelFor('match'));
+    progress.setCounts(0, currentGrid.totalBlocks);
+    const myRun = generation;
     try {
       await core.run();
-      // 一括実行のため完了時点で全ブロックが割当済み(進捗バー 100%)
+      if (myRun !== generation) {
+        return; // キャンセル済み: 完了処理は行わない
+      }
+      if (store.getData().state !== 'GENERATING') {
+        return; // 実行中に状態が変わった(タイル全削除など。M6 で差分処理に発展)
+      }
       store.dispatch({ type: 'GENERATION_FINISHED' });
       const data = store.getData();
-      progress.setCounts(data.totalBlocks ?? 0, data.totalBlocks ?? 0);
+      const total = data.totalBlocks ?? 0;
+      progress.setCounts(total, total);
+      progress.setPhase(phaseLabelFor('compose'));
       const img = await core.exportImage();
       preview.drawCompleted(img);
-      progress.setPhase(phaseLabelFor('compose'));
     } catch (err) {
+      if (myRun !== generation) {
+        return;
+      }
       console.error('generate failed', err);
       // 状態を再生成待ちへ戻した上でエラーを表示
       store.dispatch({ type: 'GENERATION_FAILED' });
       showError(messages.errorGenerate);
       progress.reset();
-    } finally {
-      demoButton.disabled = false;
     }
+  };
+  controls.handleGenerate(() => void startGeneration());
+
+  // --- 生成のキャンセル(M5): バッチ境界で停止し、再生成待ちへ戻る(詳細設計書 7.5) ---
+  controls.handleCancel(() => {
+    if (store.getData().state !== 'GENERATING') {
+      return;
+    }
+    generation += 1;
+    core.cancel();
+    store.dispatch({ type: 'GENERATION_CANCELED' });
+    progress.setPhase(messages.canceledDone);
   });
 
   // --- S2: 保存(コアの完成 RGBA → PNG エンコード → ダウンロード) ---
@@ -328,6 +367,9 @@ async function main(): Promise<void> {
 
   // --- リセット(S2 の「戻る」がリセットを兼ねる: 全状態クリア → S1 へ) ---
   const reset = (): void => {
+    // 実行中の生成があれば停止する(リセットは全状態クリア)
+    generation += 1;
+    core.cancel();
     store.dispatch({ type: 'RESET' });
     core.clearMainImage();
     core.clearTiles();
@@ -337,6 +379,7 @@ async function main(): Promise<void> {
     }
     tileUrls.clear();
     nextTileId = 0n;
+    currentGrid = null;
     clearError();
     progress.reset();
     controls.setBlockSizeValue(24);

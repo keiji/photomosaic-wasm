@@ -20,6 +20,9 @@ export const messages = {
   back: '← 戻る',
   save: '保存',
   generate: 'フォトモザイクを生成',
+  cancel: 'キャンセル',
+  canceling: 'キャンセルしています…',
+  canceledDone: '生成をキャンセルしました',
   blockSizeLabel: 'ブロックサイズ',
   blockSizeUnit: 'px',
   tilesRequiredHint: '構成画像を追加してください',
@@ -36,7 +39,6 @@ export const messages = {
   progressTitle: '進捗表示',
   progressHide: '非表示 ▲',
   progressShow: '表示 ▼',
-  progressDemo: '進捗デモ(WASM)',
   progressBlocksLabel: (assigned: number, total: number, percent: number): string =>
     `${assigned.toLocaleString('ja-JP')} / ${total.toLocaleString('ja-JP')} ブロック (${percent}%)`,
 

@@ -71,7 +71,7 @@
             <output id="block-size-value" for="block-size-slider"></output>
           </div>
 
-          <!-- フォトモザイク一括生成(M4) -->
+          <!-- フォトモザイク一括生成(M4)。GENERATING 中はキャンセル操作(M5) -->
           <div id="generate-section" class="control-row">
             <button
               type="button"
@@ -79,6 +79,7 @@
               class="button button-primary"
               disabled
             ></button>
+            <button type="button" id="cancel-button" class="button" hidden></button>
             <p id="tiles-required-hint" class="tiles-hint" hidden></p>
           </div>
 
@@ -106,8 +107,6 @@
               </div>
               <span id="progress-label"></span>
               <span id="phase-label"></span>
-              <!-- M1 検証用: WASM 経由の進捗コールバック経路を確認するデモ(M5 で本物に置き換わる) -->
-              <button type="button" id="progress-demo" class="button button-small"></button>
             </div>
           </div>
 

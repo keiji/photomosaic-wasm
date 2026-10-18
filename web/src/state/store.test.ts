@@ -45,6 +45,12 @@ describe('transition(状態遷移モデル: 基本設計書 1.4)', () => {
     expect(transition('GENERATING', { type: 'GENERATION_FINISHED' })).toBe('DONE');
   });
 
+  it('GENERATING で生成をキャンセルすると MAIN_READY に戻る(M5)', () => {
+    expect(transition('GENERATING', { type: 'GENERATION_CANCELED' })).toBe('MAIN_READY');
+    // 実行していない状態でのキャンセルは状態を変えない
+    expect(transition('MAIN_READY', { type: 'GENERATION_CANCELED' })).toBe('MAIN_READY');
+  });
+
   it('リセットは常に EMPTY へ戻す', () => {
     const states = ['EMPTY', 'TILES_READY', 'MAIN_READY', 'GENERATING', 'DONE'] as const;
     for (const state of states) {
