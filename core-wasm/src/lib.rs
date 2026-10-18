@@ -232,6 +232,9 @@ pub fn begin_run() -> Result<(), JsValue> {
     MAIN_IMAGE.with(|cell| {
         let mut state = cell.borrow_mut();
         if let Some(main) = state.as_mut() {
+            // 新しい run が旧合成結果を無効化することを確定させ(基本設計書 3.3)、
+            // 行シードとの二重確保(最大 ~128 MB+64 MB)を避けてから実行状態を作る
+            main.composed = None;
             main.run = Some(pipeline::BatchRunState::new(
                 main.grid,
                 &main.features,

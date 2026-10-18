@@ -246,24 +246,33 @@ export async function loadTile(file: File): Promise<TileThumbs> {
   }
 
   try {
-    // 白背景へ合成して不透明化した中間画像を作る(アルファ付きタイルの対策)
+    // 白背景への合成(不透明化)はサムネイル寸法で行う。
+    // フルサイズの中間 canvas・getImageData を作らないこと(メモリスパイクの抑制:
+    // タイルは 1 枚あたり 32×32 と長辺 64 のみを保持すればよい)。
+    const compose = composeThumbSize(bitmap.width, bitmap.height);
     const canvas = document.createElement('canvas');
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
+    canvas.width = compose.width;
+    canvas.height = compose.height;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
       throw new Error('failed to acquire 2D context');
     }
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(bitmap, 0, 0);
+    ctx.fillRect(0, 0, compose.width, compose.height);
+    // フル → 長辺 64 以下への縮小はホストの高品質スケーラ(drawImage)に委ね、
+    // 縮小後の画素に対してボックスフィルタで特徴量用サムネイル(32×32)を作る。
+    // (元画像が長辺 64 以下の場合は縮小が発生せず、元画像からの直接の
+    //  ボックスフィルタ縮小と同一の結果になる)
+    ctx.drawImage(bitmap, 0, 0, compose.width, compose.height);
+    const flattened = ctx.getImageData(0, 0, compose.width, compose.height);
 
-    const flattened = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    const compose = composeThumbSize(bitmap.width, bitmap.height);
     return {
       feature: boxResize(flattened, TILE_FEATURE_THUMB, TILE_FEATURE_THUMB),
-      compose: boxResize(flattened, compose.width, compose.height),
+      compose: {
+        width: compose.width,
+        height: compose.height,
+        data: new Uint8ClampedArray(flattened.data),
+      },
     };
   } finally {
     bitmap.close();
