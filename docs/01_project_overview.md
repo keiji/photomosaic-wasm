@@ -21,9 +21,9 @@
 |---|---|---|
 | 共通コア (photomosaic core) | Rust (WASM にコンパイル) | フォトモザイク合成の全処理。ブロック分割、特徴量解析、タイル選択、合成、進捗通知 |
 | Web アプリ | TypeScript + JavaScript (Vite) | スマートフォン対応のブラウザアプリ。WASM コアを呼び出して UI を提供 |
-| Android アプリ | Kotlin + Jetpack Compose | ネイティブ Android アプリ。Web と同一の WASM コアを WebView (V8) ホスト上で実行して UI を提供 |
+| Android アプリ | Kotlin + Jetpack Compose | ネイティブ Android アプリ。Web と同一の WASM コアを JavaScript エンジン(androidx.javascriptengine)上で実行して UI を提供 |
 
-※ Android も Web と同じ .wasm を実行する。Android SDK には WASM ランタイムが標準搭載されていないため、アプリに同梱した WebView (V8) を処理ホストとして使用する。JNI 経由でネイティブコードを動かす方式(自作 cdylib の JNI バインディング等)はセキュリティリスクの観点から採用しない。詳細は [詳細設計書](./03_detailed_design.md)、[Android 実装手順](./handoff/06_android_implementation_guide.md) および [Go/Rust 選定資料](./handoff/03_go_vs_rust.md) を参照。
+※ Android も Web と同じ .wasm を実行する。Android SDK には WASM ランタイムが標準搭載されていないため、AndroidX の JavaScript Engine(androidx.javascriptengine: `JavaScriptSandbox` / `JavaScriptIsolate`)を処理ホストとして使用し、ホストとの双方向通信は **MessagePort API** を使用する。JNI 経由でネイティブコードを動かす方式(自作 cdylib の JNI バインディング等)はセキュリティリスクの観点から採用しない。詳細は [詳細設計書](./03_detailed_design.md)、[Android 実装手順](./handoff/06_android_implementation_guide.md) および [Go/Rust 選定資料](./handoff/03_go_vs_rust.md) を参照。
 
 ## 3. 主要機能
 
@@ -60,7 +60,7 @@
 - サーバーや外部サービスと一切通信しない(アップロードも解析もない)。
 - メイン画像・構成画像に顔写真が含まれていても、データが端末の外に出る経路が存在しない。
 - Android アプリは `INTERNET` パーミッションを要求しない。
-- Android の WebView ホストはネットワークロードを無効化し、ローカルのアセットからのみコードを読み込む(多層防御)。
+- Android の JavaScript エンジンはアプリとは別プロセスのサンドボックス(`JavaScriptSandbox`)上で動き、ネットワークもファイルシステムも直接扱えない。ローカルのアセットから読み込んだコードのみを実行する(多層防御)。
 - Web アプリは初回アクセス時の静的アセット取得後はネットワーク断でも動作する(Service Worker によるキャッシュ)。
 - テレメトリ・クラッシュレポート・広告などの通信機能は実装しない。
 
@@ -94,8 +94,8 @@
 |---|---|---|---|
 | 言語 | TypeScript | Kotlin | Rust |
 | UI | 標準 DOM + Canvas | Jetpack Compose | - |
-| 実行形態 | WebAssembly (wasm32-unknown-unknown) | WebView (V8) 上で Web と同一の .wasm を実行 | 同左(Android は WebView ホスト) |
-| 画像デコード | ブラウザ標準 (`createImageBitmap` / `<canvas>`) | WebView 内 (`createImageBitmap`) | コアではデコードしない(ホスト層の責務) |
+| 実行形態 | WebAssembly (wasm32-unknown-unknown) | JavaScript Engine(androidx.javascriptengine)上で Web と同一の .wasm を実行 | 同左(Android は JS サンドボックス ホスト) |
+| 画像デコード | ブラウザ標準 (`createImageBitmap` / `<canvas>`) | Kotlin (`ImageDecoder` / `BitmapFactory`) | コアではデコードしない(ホスト側の責務) |
 | 保存 | `canvas.toBlob` + download | MediaStore + 共有インテント | エンコード前の RGBA バッファを返却 |
 
 ## 8. 品質目標
@@ -104,7 +104,7 @@
 |---|---|
 | オフライン動作 | 全機能が通信なしで動作すること(通信コードは存在しない) |
 | 性能 | 代表条件(メイン 12MP・タイル 300 枚・ブロック 24px)で生成完了までおおむね 3 秒以内(ミッドレンジのデスクトップ相当)。詳細は[性能計測設計](./handoff/05_performance_measurement.md) |
-| プラットフォーム間の一貫性 | Web と Android は同一のコア・同一のホストバンドル(V8 は WebView が提供)で動作する。同一入力ピクセルに対するコア出力は決定的 |
+| プラットフォーム間の一貫性 | Web と Android は同一のコア・同一の .wasm で動作する(ホストは JS 環境で共通)。同一入力ピクセルに対するコア出力は決定的 |
 | 進捗の見やすさ | 全体ブロック数はメイン画像設定直後に判明し、進捗バーは常時反応する(16ms 以上フリーズしない) |
 
 ## 9. 用語定義

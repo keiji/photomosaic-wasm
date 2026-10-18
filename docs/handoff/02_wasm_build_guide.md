@@ -16,10 +16,10 @@
 [.wasm バイナリ + グルーコード]
         │
         ├─ Web: ページの JS から import して呼び出し (wasm-bindgen 生成グルーシップ / wasm_exec.js)
-        └─ Android: JavaScript エンジン(WebView 内蔵の V8)をホストに、Web と同一のグルーシップ + .wasm を実行
+        └─ Android: JavaScript エンジン(androidx.javascriptengine)のサンドボックスで、Web と同一の .wasm を実行
 ```
 
-重要な前提: Android も Web と同じ .wasm を実行する。Android SDK には WASM ランタイムが標準搭載されていないため、JavaScript エンジン(WebView が内蔵する V8)を処理ホストとして使用する。JNI 経由でネイティブコードを動かす方式(自作 cdylib 等)はセキュリティリスクの観点から採用しない。したがって「.wasm を作る」作業は Web と Android の両方を兼ねる。
+重要な前提: Android も Web と同じ .wasm を実行する。ホストは AndroidX の JavaScript Engine(androidx.javascriptengine: `JavaScriptSandbox` / `JavaScriptIsolate`)であり、ホストとの双方向通信は **MessagePort API** を使用する。JNI 経由でネイティブコードを動かす方式(自作 cdylib 等)はセキュリティリスクの観点から採用しない。したがって「.wasm を作る」作業は Web と Android の両方を兼ねる。
 
 ## 2. Rust で作る場合(推奨)
 
@@ -123,9 +123,10 @@ wasm-pack test --headless --firefox   # または --node
 
 ### 2.7 Android での実行(JavaScript エンジン ホスト)
 
-- Android では別のネイティブビルド(cargo-ndk による cdylib など)を行わない。Web 向けビルドの成果物(グルーシップ + .wasm)を `android/app/src/main/assets/host/` に同梱し、オフスクリーン WebView(V8)上で実行する。
-- Gradle タスクで Web のビルド成果物を assets へコピーし、Web と Android でバージョンがずれないようにする。
-- 互換性の注意: WebView の Chromium バージョンに依存する構文(top-level await など)は、対象の最低 WebView バージョンを確認した上で使用する。ランタイムで WebView バージョンを検査し、旧端末には対応メッセージを表示する。
+- Android では別のネイティブビルド(cargo-ndk による cdylib など)を行わない。Web 向けビルドの成果物(.wasm)と、サンドボックス用の薄いグルーシップ(DOM に依存しない orchestration スクリプト)を `android/app/src/main/assets/core/` に同梱し、`JavaScriptSandbox`(`androidx.javascriptengine`)上で実行する。
+- グルーシップの共通化: wasm-bindgen 生成のグルーシップ(`--target web`)は DOM に依存しないためサンドボックスでも動作する(A0 で実機検証する)。画像デコード・エンコードのような Web API 依存の処理は、Web はページの JS、Android は Kotlin が担当するため、グルーシップから分離しておく。
+- Gradle タスクで .wasm(とグルーシップ)を assets へコピーし、Web と Android でバージョンがずれないようにする。
+- 互換性の注意: `JavaScriptSandbox` に対応しない端末があるため、起動時に `JavaScriptSandbox.isSupported()` と `typeof WebAssembly` を検査し、非対応端末には対応メッセージを表示する。
 - 詳細な手順は [06_android_implementation_guide.md](./06_android_implementation_guide.md) を参照。
 
 ## 3. Go で作る場合
@@ -173,7 +174,7 @@ tinygo build -o web/app.wasm -target wasm ./cmd/core
 
 ### 3.4 Android での実行(参考)
 
-- Go でも WebView ホスト上で `wasm_exec.js` 経由で実行できる。ただし Go ランタイム込みのバイナリ(1.5 MB 超)をモバイル端末で動かすことになり、サイズ・メモリの点で不利である([03_go_vs_rust.md](./03_go_vs_rust.md) 参照)。
+- Go でも JavaScript エンジン ホスト上で `wasm_exec.js` 経由で実行できる。ただし Go ランタイム込みのバイナリ(1.5 MB 超)をモバイル端末で動かすことになり、サイズ・メモリの点で不利である。また `wasm_exec.js` の DOM 非依存環境(サンドボックス)での動作確認が別途必要になる([03_go_vs_rust.md](./03_go_vs_rust.md) 参照)。
 
 ## 4. 共通の運用上の注意
 
@@ -190,5 +191,5 @@ tinygo build -o web/app.wasm -target wasm ./cmd/core
 
 - [ ] `wasm-pack build`(または Go ビルド)が CI で再現的に成功する
 - [ ] 生成バイナリが目標サイズ以内である(既定 500 KB 以下、例外は文書化)
-- [ ] サンプル関数 1 個を Web の JS と Android の JavaScript エンジン ホスト(Kotlin 経由)の両方から呼び出し、値が往復することをテストで確認済み
+- [ ] サンプル関数 1 個を Web の JS と Android の JavaScript エンジン ホスト(`JavaScriptSandbox` 経由)の両方から呼び出し、値が往復することをテストで確認済み
 - [ ] MIME タイプ・オフラインキャッシュの扱いが Web アプリ側に反映されている

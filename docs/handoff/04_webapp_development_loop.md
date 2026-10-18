@@ -10,7 +10,7 @@
 1. **薄く始めて厚くする**: 各マイルストーンで「動くもの」を残し、常時デモ可能な状態を保つ。
 2. **コアと UI を一緒に伸ばす**: 各マイルストーンは「コアの関数追加 → バインディング → UI 結線 → 計測 → 調整」の 1 ループで構成する。
 3. **計測をループの一部にする**: マイルストーンの完了条件に性能計測の記録を含める([性能計測設計](./05_performance_measurement.md))。
-4. **Android を想定して API を固める**: Web で確定した論理 API とホストバンドル(グルーシップ + .wasm)がそのまま Android の JavaScript エンジン ホストで動くよう、M4 までにインターフェースを凍結する([06_android_implementation_guide.md](./06_android_implementation_guide.md))。
+4. **Android を想定して API を固める**: Web で確定した論理 API と .wasm がそのまま Android の JavaScript エンジン ホスト(androidx.javascriptengine)で動くよう、M4 までにインターフェースを凍結する([06_android_implementation_guide.md](./06_android_implementation_guide.md))。
 
 ## 2. リポジトリ・開発環境の初期整備
 

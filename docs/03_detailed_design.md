@@ -42,13 +42,13 @@ photomosaic-wasm/
 │       └── ui/controls.ts     … シークバー等
 ├── android/                   … Android アプリ(Kotlin + Compose)
 │   └── app/src/main/
-│       ├── assets/host/       … Web と共通のホストバンドル(JS グルーシップ + .wasm)
+│       ├── assets/core/       … 共通の .wasm とサンドボックス用グルーシップ(DOM 非依存)
 │       └── java/.../
 │           ├── MainActivity.kt
 │           ├── ui/                … Compose 画面(開始/編集)
 │           ├── data/Picker.kt     … Photo Picker 連携
-│           ├── data/ImageIo.kt    … 保存(MediaStore)・共有
-│           └── core/WebViewHost.kt … オフスクリーン WebView 上でコアを実行するホスト
+│           ├── data/ImageIo.kt    … デコード・エンコード・保存(MediaStore)・共有
+│           └── core/JsEngineHost.kt … JavaScriptSandbox 上でコアを実行するホスト(MessagePort 連携)
 └── tools/
     └── bench/                 … 性能計測ハーネス・ベンチデータ生成
 ```
@@ -58,17 +58,17 @@ photomosaic-wasm/
 ```
 [Web UI (TS)] ────────────► [ホスト層: ページの JS] ──────────────┐
                                                                   ├──► [core (Rust) を WASM として実行]
-[Android UI (Kotlin)] ──► [ホスト層: オフスクリーン WebView (V8)] ──┘
+[Android UI (Kotlin)] ──► [ホスト層: JS サンドボックス(MessagePort)] ─┘
 ```
 
 - `core` はプラットフォーム非依存(標準ライブラリ + `no_std` 相当の算術のみ)。画像デコード・エンコード・ファイル I/O を含まない。
-- Android は WebView(V8)をホストに、Web と同一のホストバンドル(グルーシップ + .wasm)を実行する。JNI によるネイティブコードの実装は行わない(セキュリティ方針)。
+- Android は JavaScript エンジン(androidx.javascriptengine: `JavaScriptSandbox`)をホストに、Web と同一の .wasm を実行する。ホストとの双方向通信は MessagePort API を使用する。JNI によるネイティブコードの実装は行わない(セキュリティ方針)。
 - UI 層はビジネスロジックを持たず、状態管理(store / ViewModel)を経由してコアを呼び出す。
-- ホスト層(Web のグルーシップ、Android の WebView ホスト)は薄く保ち、メモリ受け渡しとコールバック変換のみを担う。
+- ホスト層(Web のグルーシップ、Android の JavaScript エンジン ホスト)は薄く保ち、メモリ受け渡しとコールバック変換のみを担う。
 
 ## 2. コア API 仕様(言語中立的な論理 API)
 
-バインディングごとの具体的実装(Web の wasm-bindgen / Android の WebView ホスト)はここから機械的に導出できるものとする。
+バインディングごとの具体的実装(Web の wasm-bindgen / Android の JavaScript エンジン ホスト)はここから機械的に導出できるものとする。
 
 | 関数 | 入力 | 出力 | 説明 |
 |---|---|---|---|
@@ -85,7 +85,7 @@ photomosaic-wasm/
 | `getMetrics()` | - | JSON | 性能計測結果(詳細は[性能計測設計](./handoff/05_performance_measurement.md)) |
 
 注意:
-- `run()` は呼び出し元スレッドを長時間ブロックしない。どのホストでも処理をバッチ単位に区切って JS の制御に返す(後述 8 章)。Android では WebView(V8)内のイベントループ上でバッチが進行し、アプリの UI スレッドは塞がない。
+- `run()` は呼び出し元スレッドを長時間ブロックしない。どのホストでも処理をバッチ単位に区切って JS の制御に返す(後述 8 章)。Android では JavaScript エンジン サンドボックス(別プロセス)上でバッチが進行し、アプリの UI スレッドは塞がない。
 - 画像バッファの受け渡しは RGBA(1 ピクセル 4 バイト)に統一する。色順変換・リサイズ済みのデータを受け取る。
 
 ## 3. データ構造
@@ -283,7 +283,7 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 | プラットフォーム | 実装 |
 |---|---|
 | Web (WASM) | `wasm-bindgen` の `Closure<dyn FnMut(JsValue)>` を登録。コアはバッチ境界で `progress` JS 関数を呼ぶ |
-| Android | WebView ホストの JS から `@JavascriptInterface` ブリッジで Kotlin へ通知 → `callbackFlow` → `StateFlow<ProgressEvent>` → Compose が収集 |
+| Android | ホスト JS から MessagePort へ進捗メッセージ(JSON)を送信 → Kotlin 側受信コールバック → `callbackFlow` → `StateFlow<ProgressEvent>` → Compose が収集 |
 
 ### 7.4 部分結果通知
 
@@ -307,10 +307,11 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 
 ### 8.2 Android
 
-- コアはオフスクリーン WebView(V8)内で実行する。V8 は独自のイベントループを持ち、処理は WebView のレンダラ内で進むため、アプリの UI スレッドを塞がない。
-- Kotlin 側は `evaluateJavascript`(メインスレッド)でホストへ指示を出し、進捗・結果は `@JavascriptInterface` 経由で受け取り `callbackFlow` → `StateFlow` へ流す。
-- 大容量のピクセルバッファをブリッジに通さない。デコード・合成・エンコードはホスト(WebView)内で完結させ、Kotlin との間は「入力ファイル(ファイル取得後のバイト列)」と「完成 PNG(Base64)」「進捗 JSON」のみをやり取りする。
-- キャンセルはコルーチンキャンセルに連動させ、ホストの `cancel()` を呼ぶ。
+- コアは JavaScript エンジン サンドボックス(androidx.javascriptengine の `JavaScriptSandbox` / `JavaScriptIsolate`)内で実行する。サンドボックスはアプリとは別プロセスで動くため、処理中もアプリの UI スレッドは塞がない。
+- Kotlin ↔ ホスト JS の双方向通信は **MessagePort API** を使用する(Kotlin → JS: 制御メッセージ。JS → Kotlin: 進捗・結果メッセージ)。
+- 大容量データ(画像の RGBA バイト列・完成画像)はメッセージに含めず、named data 提供 API(バイト配列)で受け渡し、メッセージは JSON 文字列で参照(dataRef)のみを持つ。
+- 画像のデコード・縮小・PNG エンコードは Kotlin 側(プラットフォーム API)が担当する。サンドボックスには DOM/Canvas がないため、内部はピクセル配列の計算に専念する。
+- キャンセルはコルーチンキャンセルに連動させ、MessagePort 経由でホストの `cancel()` を呼ぶ。isolate は画面破棄時に close してリソースを解放する。
 
 ## 9. メモリ設計
 
@@ -320,7 +321,7 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 | 出力バッファ | 8192px 長辺上限 → 約 268 MB | 出力上限で抑止 |
 | タイル特徴 | 32×32 Lab ≈ 1 KB/枚 | 数万枚に耐える |
 | タイル合成サムネイル | 64×64 RGBA ≈ 16 KB/枚 × memory_guard | 上限超過で解像度半減 |
-| WASM ヒープ | 初期 256 MB 相当 | 伸長は wasm-bindgen 既定に任せ、失敗時はエラーとして UI へ通知。Android では V8 のヒープ上限(端末依存)があるため、実機での上限確認を品質確認に含める |
+| WASM ヒープ | 初期 256 MB 相当 | 伸長は wasm-bindgen 既定に任せ、失敗時はエラーとして UI へ通知。Android ではサンドボックス(isolate)のメモリ上限(端末依存)があるため、実機での上限確認を品質確認に含める |
 
 ## 10. 性能目標と計測
 
@@ -344,7 +345,7 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 |---|---|
 | コア単体 | 色変換の既知値検証(sRGB↔Lab 往復誤差 < 0.1)、グリッド計算の端数、距離関数の性質(使用ペナルティで順位が変わること等) |
 | ゴールデン画像 | 固定入力(合成画像 4 枚 + タイル 12 枚)からの Deterministic 出力をハッシュ比較(パラメータ既定値、シードなし=決定的であること) |
-| WASM 結合 | `wasm-bindgen-test` で同一結果になることに加え、Android の WebView ホスト(V8)でも同一結果になること |
+| WASM 結合 | `wasm-bindgen-test` で同一結果になることに加え、Android の JavaScript エンジン ホスト(サンドボックス)でも同一結果になること |
 | UI 結合 | 進捗イベントが仕様の間隔で発火すること、部分描画が抜けなく反映されること |
 | 性能リグレッション | ベンチハーネスで目標値を超えたら CI 失敗 |
 
