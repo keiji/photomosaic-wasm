@@ -41,4 +41,5 @@ export const messages = {
   // エラー(インライン表示)
   errorInvalidFile: '対応していないファイル形式です(画像ファイルを指定してください)',
   errorLoadFailed: '画像の読み込みに失敗しました',
+  errorStartup: 'アプリケーションの起動に失敗しました(詳細は開発者コンソールを参照)',
 } as const;

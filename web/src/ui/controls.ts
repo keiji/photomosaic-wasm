@@ -1,6 +1,8 @@
 /**
- * 操作部品(ブロックサイズスライダー・リセット・保存)。
+ * 操作部品(ブロックサイズスライダー・戻る・保存)。
  * 詳細設計書 5 章: ブロックサイズ 8〜128 px、スライダー操作中は 300ms デバウンス後に発火。
+ *
+ * S2 からの「戻る」はリセット(全状態クリア → S1 へ)を兼ねる(基本設計書 2.2)。
  */
 
 /** スライダー操作のデバウンス時間 ms(詳細設計書 5 章 block_size) */
@@ -15,7 +17,6 @@ export class Controls {
   private readonly slider: HTMLInputElement;
   private readonly output: HTMLOutputElement;
   private readonly saveButton: HTMLButtonElement;
-  private readonly resetButton: HTMLButtonElement;
   private readonly backButton: HTMLButtonElement;
 
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -27,7 +28,6 @@ export class Controls {
     this.slider = this.require<HTMLInputElement>('#block-size-slider');
     this.output = this.require<HTMLOutputElement>('#block-size-value');
     this.saveButton = this.require<HTMLButtonElement>('#save-button');
-    this.resetButton = this.require<HTMLButtonElement>('#reset-button');
     this.backButton = this.require<HTMLButtonElement>('#back-button');
 
     this.output.textContent = this.formatSize(Number(this.slider.value));
@@ -50,13 +50,9 @@ export class Controls {
     this.onBlockSizeChange = handler;
   }
 
-  /** 保存・リセット・戻るの各操作を登録する */
+  /** 保存・戻るの各操作を登録する(戻るがリセットを兼ねる) */
   handleSave(handler: () => void): void {
     this.saveButton.addEventListener('click', handler);
-  }
-
-  handleReset(handler: () => void): void {
-    this.resetButton.addEventListener('click', handler);
   }
 
   handleBack(handler: () => void): void {

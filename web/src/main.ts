@@ -147,7 +147,7 @@ async function main(): Promise<void> {
     }
   });
 
-  // --- リセット / 戻る(全状態クリア → S1 へ) ---
+  // --- リセット(S2 の「戻る」がリセットを兼ねる: 全状態クリア → S1 へ) ---
   const reset = (): void => {
     store.dispatch({ type: 'RESET' });
     mainImage = null;
@@ -155,7 +155,6 @@ async function main(): Promise<void> {
     progress.reset();
     controls.setBlockSizeValue(24);
   };
-  controls.handleReset(reset);
   controls.handleBack(reset);
 
   render(store.getData());
@@ -163,4 +162,10 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   console.error('failed to start application', err);
+  // 起動失敗はコンソールだけでなく画面にも表示する(無言で操作不能になるのを防ぐ)
+  const notice = document.getElementById('error-notice');
+  if (notice) {
+    notice.textContent = messages.errorStartup;
+    notice.hidden = false;
+  }
 });
