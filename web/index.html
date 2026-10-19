@@ -56,6 +56,12 @@
           <div class="edit-toolbar">
             <button type="button" id="back-button" class="button"></button>
             <h2 id="edit-heading" class="edit-title"></h2>
+            <!-- 保存形式(M8・詳細設計書 4.7: 既定 PNG。JPEG の品質は 92) -->
+            <label class="visually-hidden" for="save-format" id="save-format-label"></label>
+            <select id="save-format" class="save-format">
+              <option value="png">PNG</option>
+              <option value="jpeg">JPEG</option>
+            </select>
             <button type="button" id="save-button" class="button button-primary" disabled></button>
           </div>
 
@@ -78,6 +84,27 @@
           <div id="main-blend-section" class="control-row">
             <label for="main-blend-slider" id="main-blend-label"></label>
             <input type="range" id="main-blend-slider" min="0" max="0.8" step="0.05" value="0.2" />
+          </div>
+
+          <!-- 色補正強度(M8・詳細設計書 4.6/5 章 α): タイルのトーンをブロック平均色へ
+               寄せる強さ。数値は表示せず、ドラッグ確定(マウスを離した)時に再計算する -->
+          <div id="color-correct-section" class="control-row">
+            <label for="color-correct-slider" id="color-correct-label"></label>
+            <input
+              type="range"
+              id="color-correct-slider"
+              min="0"
+              max="1"
+              step="0.05"
+              value="0.85"
+            />
+          </div>
+
+          <!-- 重複制御(M8・詳細設計書 4.4/5 章 duplicate_de): 似たタイルを同一視する
+               代表色の距離。数値は表示せず、ドラッグ確定(マウスを離した)時に再計算する -->
+          <div id="duplicate-section" class="control-row">
+            <label for="duplicate-de-slider" id="duplicate-de-label"></label>
+            <input type="range" id="duplicate-de-slider" min="0.5" max="8" step="0.5" value="2" />
           </div>
 
           <!-- フォトモザイク一括生成(M4)。GENERATING 中はキャンセル操作(M5) -->
@@ -115,7 +142,7 @@
                 <div id="progress-bar-fill"></div>
               </div>
               <span id="progress-label"></span>
-              <span id="phase-label"></span>
+              <span id="phase-label" role="status"></span>
             </div>
           </div>
 

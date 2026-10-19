@@ -17,11 +17,30 @@ export const MAIN_BLEND_MIN = 0;
 export const MAIN_BLEND_MAX = 0.8;
 export const MAIN_BLEND_STEP = 0.05;
 
+/** 色補正強度の範囲・刻み(M8・詳細設計書 5 章 color_correct。数値表示なし) */
+export const COLOR_CORRECT_MIN = 0;
+export const COLOR_CORRECT_MAX = 1;
+export const COLOR_CORRECT_STEP = 0.05;
+export const COLOR_CORRECT_DEFAULT = 0.85;
+
+/** 重複制御(同一視距離)の範囲・刻み(M8・詳細設計書 5 章 duplicate_de。数値表示なし) */
+export const DUPLICATE_DE_MIN = 0.5;
+export const DUPLICATE_DE_MAX = 8;
+export const DUPLICATE_DE_STEP = 0.5;
+export const DUPLICATE_DE_DEFAULT = 2;
+
+/** 保存形式(M8・詳細設計書 4.7: 既定 PNG。JPEG 品質は 92) */
+export type SaveFormat = 'png' | 'jpeg';
+export const SAVE_FORMAT_DEFAULT: SaveFormat = 'png';
+
 export class Controls {
   private readonly root: HTMLElement;
   private readonly slider: HTMLInputElement;
   private readonly output: HTMLOutputElement;
   private readonly mainBlendSlider: HTMLInputElement;
+  private readonly colorCorrectSlider: HTMLInputElement;
+  private readonly duplicateDeSlider: HTMLInputElement;
+  private readonly saveFormat: HTMLSelectElement;
   private readonly saveButton: HTMLButtonElement;
   private readonly backButton: HTMLButtonElement;
   private readonly generateButton: HTMLButtonElement;
@@ -30,6 +49,8 @@ export class Controls {
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private onBlockSizeChange: (px: number) => void = () => {};
   private onMainBlendChange: (value: number) => void = () => {};
+  private onColorCorrectChange: (value: number) => void = () => {};
+  private onDuplicateDeChange: (value: number) => void = () => {};
   private pendingValue: number | null = null;
 
   constructor(root: HTMLElement) {
@@ -37,6 +58,9 @@ export class Controls {
     this.slider = this.require<HTMLInputElement>('#block-size-slider');
     this.output = this.require<HTMLOutputElement>('#block-size-value');
     this.mainBlendSlider = this.require<HTMLInputElement>('#main-blend-slider');
+    this.colorCorrectSlider = this.require<HTMLInputElement>('#color-correct-slider');
+    this.duplicateDeSlider = this.require<HTMLInputElement>('#duplicate-de-slider');
+    this.saveFormat = this.require<HTMLSelectElement>('#save-format');
     this.saveButton = this.require<HTMLButtonElement>('#save-button');
     this.backButton = this.require<HTMLButtonElement>('#back-button');
     this.generateButton = this.require<HTMLButtonElement>('#generate-button');
@@ -54,6 +78,16 @@ export class Controls {
     // 離した = change)したタイミングでのみ再計算を依頼する
     this.mainBlendSlider.addEventListener('change', () => {
       this.onMainBlendChange(Number(this.mainBlendSlider.value));
+    });
+
+    // 色補正強度(M8): メイン画像ブレンドと同じく確定時に再計算する
+    this.colorCorrectSlider.addEventListener('change', () => {
+      this.onColorCorrectChange(Number(this.colorCorrectSlider.value));
+    });
+
+    // 重複制御(M8): 同一視グループの再構築を伴うため、確定時に再マッチ込みで再計算する
+    this.duplicateDeSlider.addEventListener('change', () => {
+      this.onDuplicateDeChange(Number(this.duplicateDeSlider.value));
     });
   }
 
@@ -76,6 +110,36 @@ export class Controls {
   /** メイン画像ブレンド確定(マウスを離した)のコールバックを登録する */
   handleMainBlendChange(handler: (value: number) => void): void {
     this.onMainBlendChange = handler;
+  }
+
+  /** 色補正強度(M8)の表示値を設定する(イベント発火なし。リセット用) */
+  setColorCorrectValue(value: number): void {
+    this.colorCorrectSlider.value = String(value);
+  }
+
+  /** 色補正強度確定(マウスを離した)のコールバックを登録する(M8) */
+  handleColorCorrectChange(handler: (value: number) => void): void {
+    this.onColorCorrectChange = handler;
+  }
+
+  /** 重複制御(M8)の表示値を設定する(イベント発火なし。リセット用) */
+  setDuplicateDeValue(value: number): void {
+    this.duplicateDeSlider.value = String(value);
+  }
+
+  /** 重複制御確定(マウスを離した)のコールバックを登録する(M8) */
+  handleDuplicateDeChange(handler: (value: number) => void): void {
+    this.onDuplicateDeChange = handler;
+  }
+
+  /** 選択中の保存形式を返す(M8・保存時に参照する) */
+  getSaveFormat(): SaveFormat {
+    return this.saveFormat.value === 'jpeg' ? 'jpeg' : 'png';
+  }
+
+  /** 保存形式の表示を設定する(イベント発火なし。リセット用) */
+  setSaveFormat(format: SaveFormat): void {
+    this.saveFormat.value = format;
   }
 
   /** 保存・戻るの各操作を登録する(戻るがリセットを兼ねる) */

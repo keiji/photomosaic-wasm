@@ -254,6 +254,16 @@ body {
   padding: 4px 10px;
 }
 
+/* --- 保存形式セレクト(M8: PNG / JPEG) --- */
+.save-format {
+  font: inherit;
+  padding: 8px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
 #preview-frame {
   border: 1px solid var(--color-border);
   border-radius: var(--radius);

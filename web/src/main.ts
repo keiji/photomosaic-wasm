@@ -17,9 +17,9 @@
  */
 import './style.css';
 import { InvalidFileError, loadMainImage, loadTile } from './io/imageLoader';
-import { buildDownloadFilename, downloadBlob, encodePng } from './io/exporter';
+import { buildDownloadFilename, downloadBlob, encodeImage } from './io/exporter';
 import { createCoreBridge, getCoreImplementation } from './core/bridge';
-import type { GridInfo } from './core/types';
+import type { GridInfo, MosaicConfig } from './core/types';
 import { AppStore } from './state/store';
 import type { AppStoreData } from './state/store';
 import { messages, phaseLabelFor } from './i18n/messages';
@@ -27,6 +27,7 @@ import { setupFileZone } from './ui/dropZone';
 import { Preview } from './ui/preview';
 import { ProgressPanel } from './ui/progress';
 import { Controls } from './ui/controls';
+import { COLOR_CORRECT_DEFAULT, DUPLICATE_DE_DEFAULT, SAVE_FORMAT_DEFAULT } from './ui/controls';
 import { TileList } from './ui/tileList';
 import { MetricsOverlay } from './ui/metricsOverlay';
 
@@ -67,6 +68,9 @@ function applyMessages(): void {
   requireElement<HTMLButtonElement>('#cancel-button').textContent = messages.cancel;
   requireElement<HTMLElement>('#tiles-required-hint').textContent = messages.tilesRequiredHint;
   requireElement<HTMLElement>('#main-blend-label').textContent = messages.mainBlendLabel;
+  requireElement<HTMLElement>('#color-correct-label').textContent = messages.colorCorrectLabel;
+  requireElement<HTMLElement>('#duplicate-de-label').textContent = messages.duplicateDeLabel;
+  requireElement<HTMLElement>('#save-format-label').textContent = messages.saveFormatLabel;
   requireElement<HTMLElement>('#preview-hint').textContent = messages.previewDropHint;
   requireElement<HTMLDivElement>('#preview-frame').setAttribute(
     'aria-label',
@@ -75,6 +79,11 @@ function applyMessages(): void {
   requireElement<HTMLCanvasElement>('#preview-canvas').setAttribute(
     'aria-label',
     messages.previewAriaLabel,
+  );
+  // 進捗バーのアクセシブルネーム(M8 a11y: 読み上げ用)
+  requireElement<HTMLElement>('#progress-bar').setAttribute(
+    'aria-label',
+    messages.progressBarAriaLabel,
   );
 }
 
@@ -422,12 +431,19 @@ async function main(): Promise<void> {
     }
   });
 
-  // --- S2: メイン画像ブレンド(詳細設計書 4.6)。
-  // ドラッグ中は再計算せず、確定(マウスを離した)タイミングで設定を更新し
-  // フル再生成する(実行中の生成は要求の合流 7.5 でキャンセル後に再開) ---
-  controls.handleMainBlendChange(async (value) => {
+  // --- S2: 設定変更の共通処理(スライダー確定 → 設定更新 → フル再生成) ---
+  /** コア設定を部分更新する(ブレンド・色補正強度・重複制御から使う。M8 で共通化) */
+  const updateConfig = async (patch: Partial<MosaicConfig>): Promise<void> => {
     const config = await core.getConfig();
-    await core.setConfig({ ...config, main_blend: value });
+    await core.setConfig({ ...config, ...patch });
+  };
+
+  /**
+   * 設定変更後のフル再生成。
+   * 実行中の生成は要求の合流(詳細設計書 7.5)でバッチ境界のキャンセル後に
+   * 最新状態で再開する。メイン画像またはタイル未設定のときは再計算しない
+   */
+  const regenerateFull = async (): Promise<void> => {
     if (currentGrid === null || store.getData().tileCount === 0) {
       return; // 再計算の対象がない(メイン画像またはタイル未設定)
     }
@@ -438,6 +454,29 @@ async function main(): Promise<void> {
     store.dispatch({ type: 'GENERATION_STARTED' });
     progress.setCounts(0, currentGrid.totalBlocks);
     await executeRun('full');
+  };
+
+  // --- S2: メイン画像ブレンド(詳細設計書 4.6)。
+  // ドラッグ中は再計算せず、確定(マウスを離した)タイミングで設定を更新し
+  // フル再生成する ---
+  controls.handleMainBlendChange(async (value) => {
+    await updateConfig({ main_blend: value });
+    await regenerateFull();
+  });
+
+  // --- S2: 色補正強度(M8・詳細設計書 4.6/5 章 α)。
+  // ブレンドと同じく確定(マウスを離した)タイミングで設定を更新しフル再生成する ---
+  controls.handleColorCorrectChange(async (value) => {
+    await updateConfig({ color_correct: value });
+    await regenerateFull();
+  });
+
+  // --- S2: 重複制御(M8・詳細設計書 4.4 重複グループ)。
+  // 同一視閾値はマッチング開始時のグループ再構築で反映されるため、
+  // 確定タイミングでフル再生成(P3 再マッチ)する ---
+  controls.handleDuplicateDeChange(async (value) => {
+    await updateConfig({ duplicate_de: value });
+    await regenerateFull();
   });
 
   /**
@@ -533,13 +572,14 @@ async function main(): Promise<void> {
     progress.setPhase(messages.canceledDone);
   });
 
-  // --- S2: 保存(コアの完成 RGBA → PNG エンコード → ダウンロード) ---
+  // --- S2: 保存(コアの完成 RGBA → 選択形式でエンコード → ダウンロード。M8 で PNG/JPEG 選択) ---
   controls.handleSave(async () => {
     try {
       progress.setPhase(messages.phaseExport);
+      const format = controls.getSaveFormat();
       const image = await core.exportImage();
-      const blob = await encodePng(image);
-      downloadBlob(blob, buildDownloadFilename());
+      const blob = await encodeImage(image, format);
+      downloadBlob(blob, buildDownloadFilename(format));
     } catch (err) {
       console.error('export failed', err);
       showError(messages.errorGenerate);
@@ -567,13 +607,19 @@ async function main(): Promise<void> {
     progress.reset();
     metricsOverlay.clear();
     controls.setBlockSizeValue(24);
-    // メイン画像ブレンドも初期化する(スライダー UI とコア設定の整合)。
-    // コア設定はセッションをまたいで保持されるため、ここで明示的に戻す
+    // 設定系スライダーと保存形式も初期化する(M8)。コア設定はセッションを
+    // またいで保持されるため、ここで明示的に既定へ戻す
     controls.setMainBlendValue(0.2);
+    controls.setColorCorrectValue(COLOR_CORRECT_DEFAULT);
+    controls.setDuplicateDeValue(DUPLICATE_DE_DEFAULT);
+    controls.setSaveFormat(SAVE_FORMAT_DEFAULT);
     void (async () => {
       try {
-        const config = await core.getConfig();
-        await core.setConfig({ ...config, main_blend: 0.2 });
+        await updateConfig({
+          main_blend: 0.2,
+          color_correct: COLOR_CORRECT_DEFAULT,
+          duplicate_de: DUPLICATE_DE_DEFAULT,
+        });
       } catch (err) {
         console.warn('config reset failed', err);
       }

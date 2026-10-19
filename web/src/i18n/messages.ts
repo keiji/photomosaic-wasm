@@ -35,6 +35,12 @@ export const messages = {
   blockSizeUnit: 'px',
   /** メイン画像ブレンドのスライダー(詳細設計書 4.6。数値は表示しない) */
   mainBlendLabel: 'メイン画像に適合させる',
+  /** 色補正強度のスライダー(M8・詳細設計書 5 章 α。数値は表示しない) */
+  colorCorrectLabel: '色補正の強さ',
+  /** 重複制御のスライダー(M8・詳細設計書 4.4 重複グループ。数値は表示しない) */
+  duplicateDeLabel: '重複とみなす色の近さ',
+  /** 保存形式の選択(詳細設計書 4.7: 既定 PNG) */
+  saveFormatLabel: '保存形式',
   /** プレビューの操作案内(クリック/ドロップでメイン画像を変更) */
   previewChangeLabel: 'メイン画像を変更する(クリックまたはドロップ)',
   previewDropHint: 'クリックまたはドロップでメイン画像を変更できます',
@@ -50,6 +56,8 @@ export const messages = {
 
   // 進捗表示領域
   progressTitle: '進捗表示',
+  /** 進捗バーのアクセシブルネーム(a11y: 読み上げ用。M8) */
+  progressBarAriaLabel: '生成の進捗',
   progressHide: '非表示 ▲',
   progressShow: '表示 ▼',
   progressBlocksLabel: (assigned: number, total: number, percent: number): string =>
