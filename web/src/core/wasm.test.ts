@@ -242,6 +242,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
         duplicate_detail: 4.0,
         usage_cap: 4,
         color_correct: 0.85,
+        main_blend: 0.2,
         row_batch: 8,
       };
       for (const [key, value] of Object.entries(expected)) {
@@ -269,6 +270,9 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       );
       expect(() => wasm.set_config(JSON.stringify({ ...config, duplicate_detail: 40 }))).toThrow(
         /duplicate_detail/,
+      );
+      expect(() => wasm.set_config(JSON.stringify({ ...config, main_blend: 0.9 }))).toThrow(
+        /main_blend/,
       );
       // 失敗した set は既存設定(既定へ復元済み)を壊さない
       expect(JSON.parse(wasm.get_config()).color_correct).toBeCloseTo(0.85, 5);
@@ -313,6 +317,46 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       const main = new Uint8Array(24 * 24 * 4);
       wasm.set_main_image(main, 24, 24);
       expect(() => wasm.run()).toThrow(/tile pool is empty/);
+    });
+
+    it('main_blend でメイン画像を合成結果へブレンドする(詳細設計書 4.6)', () => {
+      // メイン: グレー 127 の 1 ブロック / タイル: 赤。
+      // ブレンド 0 では色補正済みタイル(R ≈ 127、G/B ≈ 0)、
+      // ブレンド 0.8 では 0.2 * タイル + 0.8 * メイン(G/B ≈ 102)になる
+      const main = new Uint8Array(24 * 24 * 4);
+      for (let offset = 0; offset < main.length; offset += 4) {
+        main[offset] = 127;
+        main[offset + 1] = 127;
+        main[offset + 2] = 127;
+        main[offset + 3] = 255;
+      }
+      wasm.set_main_image(main, 24, 24);
+      wasm.add_tile(1n, featureThumb(255, 0, 0), composeThumb(64, 64, [255, 0, 0]), 64, 64);
+
+      const center = (rgba: Uint8Array): { r: number; g: number } => ({
+        r: rgba[(12 * 24 + 12) * 4] as number,
+        g: rgba[(12 * 24 + 12) * 4 + 1] as number,
+      });
+      const saved = wasm.get_config();
+      try {
+        // ブレンド 0: 色補正のみ(メイン画像のグレーは混ざらない)
+        wasm.set_config(JSON.stringify({ ...JSON.parse(saved), main_blend: 0.0 }));
+        wasm.run();
+        const noBlend = center(wasm.export_main_image());
+        expect(noBlend.r).toBeGreaterThanOrEqual(120);
+        expect(noBlend.g).toBeLessThan(5);
+
+        // ブレンド 0.8 で再生成: メイン画像(グレー)が 8 割混ざる
+        wasm.set_config(JSON.stringify({ ...JSON.parse(saved), main_blend: 0.8 }));
+        wasm.run();
+        const blended = center(wasm.export_main_image());
+        // R: 0.2 * 127 + 0.8 * 127 = 127 / G: 0.2 * 0 + 0.8 * 127 = 102
+        expect(blended.r).toBeGreaterThanOrEqual(120);
+        expect(blended.g).toBeGreaterThanOrEqual(90);
+        expect(blended.g).toBeLessThanOrEqual(115);
+      } finally {
+        wasm.set_config(saved);
+      }
     });
 
     it('メイン画像未設定での run はエラーになる', () => {

@@ -195,6 +195,7 @@ fn begin_run_record(block_size_px: u32, config: &MosaicConfig, tiles_bytes: u64)
             neighbor_penalty: config.neighbor_penalty,
             duplicate_de: config.duplicate_de,
             duplicate_detail: config.duplicate_detail,
+            main_blend: config.main_blend,
             color_correct: config.color_correct,
             row_batch: config.row_batch,
         };
@@ -578,7 +579,11 @@ pub fn step_run(now_ms: Option<f64>) -> Result<JsStepOutput, JsValue> {
             let Some(run) = main.run.as_mut() else {
                 return Err(js_error("run is not started"));
             };
-            let step = run.step(&mut pool, &config, now_ms);
+            // メイン画像ブレンド(4.6)の重ね合わせ元としてメイン画像を渡す
+            // (main_blend = 0 のときは compose 内でスキップされる)。
+            // main.run(可変)と main.rgba(共有)は異なるフィールドのため
+            // 同時借用できる
+            let step = run.step(&mut pool, &config, now_ms, Some(&main.rgba));
             let done = step.done;
             let canceled = run.is_canceled();
             let progress = step.progress.map(JsProgressEvent::from_event);
@@ -702,6 +707,7 @@ pub fn set_config(json: String) -> Result<(), JsValue> {
         improve_margin: f32_field("improve_margin")?,
         duplicate_de: f32_field("duplicate_de")?,
         duplicate_detail: f32_field("duplicate_detail")?,
+        main_blend: f32_field("main_blend")?,
         usage_cap: u32_field("usage_cap")?,
         color_correct: f32_field("color_correct")?,
         row_batch: u32_field("row_batch")?,
@@ -728,6 +734,7 @@ fn config_to_json(config: &MosaicConfig) -> Result<String, JsValue> {
         ("improve_margin", f64::from(config.improve_margin)),
         ("duplicate_de", f64::from(config.duplicate_de)),
         ("duplicate_detail", f64::from(config.duplicate_detail)),
+        ("main_blend", f64::from(config.main_blend)),
         ("usage_cap", f64::from(config.usage_cap)),
         ("color_correct", f64::from(config.color_correct)),
         ("row_batch", f64::from(config.row_batch)),

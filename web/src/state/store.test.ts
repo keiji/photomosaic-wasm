@@ -58,9 +58,12 @@ describe('transition(状態遷移モデル: 基本設計書 1.4)', () => {
     }
   });
 
-  it('メイン画像設定後の MAIN_READY にメイン画像設定を繰り返しても変化しない', () => {
+  it('メイン画像の変更(MAIN_READY / GENERATING / DONE)は再生成待ちへ戻す', () => {
+    // 基本設計書 3.3: メイン画像の設定・変更は全処理をリセットしてやり直す
+    // (タイルプールは維持)。生成結果は無効になり再生成待ちへ戻る
     expect(transition('MAIN_READY', { type: 'MAIN_IMAGE_SET' })).toBe('MAIN_READY');
-    expect(transition('DONE', { type: 'MAIN_IMAGE_SET' })).toBe('DONE');
+    expect(transition('GENERATING', { type: 'MAIN_IMAGE_SET' })).toBe('MAIN_READY');
+    expect(transition('DONE', { type: 'MAIN_IMAGE_SET' })).toBe('MAIN_READY');
   });
 });
 

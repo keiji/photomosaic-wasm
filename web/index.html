@@ -59,16 +59,25 @@
             <button type="button" id="save-button" class="button button-primary" disabled></button>
           </div>
 
-          <!-- プレビューキャンバス(メイン画像 → フォトモザイク) -->
-          <div id="preview-frame">
+          <!-- プレビューキャンバス(メイン画像 → フォトモザイク)。
+               クリック/ドロップでメイン画像を変更できる(基本設計書 3.3) -->
+          <div id="preview-frame" role="button" tabindex="0" aria-describedby="preview-hint">
             <canvas id="preview-canvas" role="img"></canvas>
           </div>
+          <p id="preview-hint" class="tiles-hint"></p>
 
           <!-- ブロックサイズ -->
           <div id="block-size-section" class="control-row">
             <label for="block-size-slider" id="block-size-label"></label>
             <input type="range" id="block-size-slider" min="8" max="128" step="1" value="24" />
             <output id="block-size-value" for="block-size-slider"></output>
+          </div>
+
+          <!-- メイン画像ブレンド(詳細設計書 4.6): 元画像を重ねる不透明度。
+               数値は表示せず、ドラッグ確定(マウスを離した)時に再計算する -->
+          <div id="main-blend-section" class="control-row">
+            <label for="main-blend-slider" id="main-blend-label"></label>
+            <input type="range" id="main-blend-slider" min="0" max="0.8" step="0.05" value="0.2" />
           </div>
 
           <!-- フォトモザイク一括生成(M4)。GENERATING 中はキャンセル操作(M5) -->

@@ -31,12 +31,18 @@ export type AppEvent =
 export function transition(state: AppState, event: AppEvent): AppState {
   switch (event.type) {
     case 'MAIN_IMAGE_SET':
-      // EMPTY では S2 へ。TILES_READY ではメイン画像設定と同時に生成が自動開始する
+      // EMPTY では S2 へ。TILES_READY ではメイン画像設定と同時に生成が自動開始する。
+      // MAIN_READY / GENERATING / DONE ではメイン画像の変更(基本設計書 3.3:
+      // 全処理をリセットしてやり直し。タイルプールは維持)になり再生成待ちへ戻る
       switch (state) {
         case 'EMPTY':
           return 'MAIN_READY';
         case 'TILES_READY':
           return 'GENERATING';
+        case 'MAIN_READY':
+        case 'GENERATING':
+        case 'DONE':
+          return 'MAIN_READY';
         default:
           return state;
       }

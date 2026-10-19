@@ -276,12 +276,15 @@ impl BatchRunState {
     /// - `now_ms` はホストの時刻(起点は不問)。[`ProgressThrottle`] の判定に
     ///   使用する。`None` の場合は進捗イベントを抑制する(時刻を持たない
     ///   一括実行を想定)
+    /// - `main_rgba` はメイン画像ブレンド(詳細設計書 4.6)の重ね合わせ元。
+    ///   `config.main_blend > 0` のとき合成へ渡す。None または 0 ではブレンドしない
     /// - 呼び出し側は戻り値の `done` が `true` になるまで step を繰り返す
     pub fn step(
         &mut self,
         pool: &mut TilePool,
         config: &MosaicConfig,
         now_ms: Option<f64>,
+        main_rgba: Option<&[u8]>,
     ) -> Step {
         if self.done {
             return Step {
@@ -292,7 +295,7 @@ impl BatchRunState {
         }
         match self.phase {
             RunPhase::Matching => self.step_match(pool, config, now_ms),
-            RunPhase::Composing => self.step_compose(pool, config, now_ms),
+            RunPhase::Composing => self.step_compose(pool, config, now_ms, main_rgba),
         }
     }
 
@@ -397,6 +400,7 @@ impl BatchRunState {
         pool: &TilePool,
         config: &MosaicConfig,
         now_ms: Option<f64>,
+        main_rgba: Option<&[u8]>,
     ) -> Step {
         let batch = config.row_batch.max(1);
         let total_dirty = self.compose_dirty_rows.len();
@@ -422,6 +426,7 @@ impl BatchRunState {
             &self.assigned,
             pool,
             config,
+            main_rgba,
             begin,
             end,
         );
@@ -546,8 +551,9 @@ pub fn run_phases(
 
     let mut state = BatchRunState::new(*grid, block_features, seed_rgba);
     while !state.is_done() {
-        // 一括実行では進捗イベントを返さない(時刻を渡さない)
-        if state.step(pool, config, None).done {
+        // 一括実行では進捗イベントを返さない(時刻を渡さない)。
+        // シードはメイン画像なので、メイン画像ブレンド(4.6)の重ね合わせ元にも使う
+        if state.step(pool, config, None, Some(seed_rgba)).done {
             break;
         }
     }
@@ -759,13 +765,14 @@ mod tests {
         state: &mut BatchRunState,
         pool: &mut TilePool,
         config: &MosaicConfig,
+        main_rgba: Option<&[u8]>,
         now_ms: &mut f64,
         interval_ms: f64,
     ) -> (Vec<ProgressEvent>, Vec<ResultBatch>) {
         let mut progress_events = Vec::new();
         let mut batches = Vec::new();
         while !state.is_done() {
-            let s = state.step(pool, config, Some(*now_ms));
+            let s = state.step(pool, config, Some(*now_ms), main_rgba);
             *now_ms += interval_ms;
             if let Some(event) = s.progress {
                 progress_events.push(event);
@@ -783,7 +790,8 @@ mod tests {
     #[test]
     fn batch_stepping_equals_single_shot_output() {
         // 行バッチ駆動(M5)と一括実行(M4 経路)は同一の結果になること。
-        // 完了条件(handoff/04 M2): ゴールデン相当の固定入力比較
+        // 完了条件(handoff/04 M2): ゴールデン相当の固定入力比較。
+        // 両経路とも main_blend ブレンドの重ね合わせ元にメイン画像を渡す
         let f = TestImage::new(96, 48, 24);
         let single = {
             let mut pool = setup_pool(4);
@@ -792,7 +800,14 @@ mod tests {
         };
         let mut state = BatchRunState::new(f.grid, &f.features, &f.rgba);
         let mut pool = setup_pool(4);
-        let (events, batches) = drive(&mut state, &mut pool, &f.config, &mut 0.0, 16.0);
+        let (events, batches) = drive(
+            &mut state,
+            &mut pool,
+            &f.config,
+            Some(&f.rgba),
+            &mut 0.0,
+            16.0,
+        );
         assert!(state.is_done());
         assert!(!state.is_canceled());
 
@@ -844,7 +859,7 @@ mod tests {
         let mut emit_at: Vec<(f64, ProgressEvent)> = Vec::new();
         let mut steps = 0_usize;
         while !state.is_done() {
-            let s = state.step(&mut pool, &config, Some(now));
+            let s = state.step(&mut pool, &config, Some(now), None);
             if let Some(event) = s.progress {
                 emit_at.push((now, event));
             }
@@ -887,7 +902,7 @@ mod tests {
         let mut last_match_overall = None;
         let mut seen_compose_phase = false;
         while !state.is_done() {
-            let s = state.step(&mut pool, &f.config, Some(now));
+            let s = state.step(&mut pool, &f.config, Some(now), None);
             now += 20.0;
             if let Some(event) = s.progress {
                 match event.phase {
@@ -930,7 +945,7 @@ mod tests {
         let mut pool = setup_pool(4);
         let now = 0.0_f64;
         // P3 の 1 バッチだけ進める(2 行バッチ以上ある)
-        let s = state.step(&mut pool, &f.config, Some(now));
+        let s = state.step(&mut pool, &f.config, Some(now), None);
         assert!(!s.done);
         assert!(s.result.is_none(), "match phase has no result batch");
         assert_eq!(f.grid.rows, 16, "precondition: multiple match batches");
@@ -939,7 +954,7 @@ mod tests {
         assert!(state.is_done());
         assert!(state.is_canceled());
         // キャンセル後の step は no-op
-        let s = state.step(&mut pool, &f.config, Some(now));
+        let s = state.step(&mut pool, &f.config, Some(now), None);
         assert!(s.done && s.progress.is_none() && s.result.is_none());
 
         // 既存のマッチ結果・現時点までの合成結果(未合成行=シード)は保持される
@@ -952,20 +967,21 @@ mod tests {
 
     #[test]
     fn batch_cancel_at_compose_phase_keeps_composed_rows() {
-        // 合成 1 バッチ完了後のキャンセル: 完成行は合成結果、未完成行はシード
+        // 合成 1 バッチ完了後のキャンセル: 完成行は合成結果、未完成行はシード。
+        // 両経路ともメイン画像ブレンド(4.6)の重ね合わせ元を渡して比較する
         let f = TestImage::new(96, 384, 24);
         let mut state = BatchRunState::new(f.grid, &f.features, &f.rgba);
         let mut pool = setup_pool(4);
         let mut now = 0.0_f64;
         // P3(2 バッチ)を完走
-        let s1 = state.step(&mut pool, &f.config, Some(now));
+        let s1 = state.step(&mut pool, &f.config, Some(now), Some(&f.rgba));
         now += 16.0;
         assert!(!s1.done);
-        let s2 = state.step(&mut pool, &f.config, Some(now));
+        let s2 = state.step(&mut pool, &f.config, Some(now), Some(&f.rgba));
         now += 16.0;
         assert!(!s2.done);
         // P4 の 1 バッチ目(行 0..8)を完了させる
-        let s3 = state.step(&mut pool, &f.config, Some(now));
+        let s3 = state.step(&mut pool, &f.config, Some(now), Some(&f.rgba));
         assert!(!s3.done);
         let batch = s3.result.expect("compose batch emits result");
         assert_eq!(batch.row_begin, 0);
@@ -996,7 +1012,7 @@ mod tests {
         let mut pool = setup_pool(4);
         let mut now = 0.0_f64;
         while !state.is_done() {
-            let s = state.step(&mut pool, &f.config, Some(now));
+            let s = state.step(&mut pool, &f.config, Some(now), None);
             now += 16.0;
             if s.done {
                 break;
@@ -1004,7 +1020,7 @@ mod tests {
         }
         // 完了後の連続呼び出しも安全(no-op)
         for _ in 0..3 {
-            let s = state.step(&mut pool, &f.config, Some(now));
+            let s = state.step(&mut pool, &f.config, Some(now), None);
             assert!(s.done && s.progress.is_none() && s.result.is_none());
         }
         assert!(!state.is_canceled());
@@ -1016,7 +1032,7 @@ mod tests {
         let f = TestImage::new(96, 48, 24);
         let mut state = BatchRunState::new(f.grid, &f.features, &f.rgba);
         let mut pool = TilePool::new();
-        let s = state.step(&mut pool, &f.config, Some(0.0));
+        let s = state.step(&mut pool, &f.config, Some(0.0), None);
         assert!(s.done && s.progress.is_none() && s.result.is_none());
         assert!(!state.is_canceled());
     }
@@ -1040,7 +1056,7 @@ mod tests {
 
         // フルランを 1 行バッチ(8 行 = 32 ブロック)だけ進めて中断する
         let mut state = BatchRunState::new(f.grid, &f.features, &f.rgba);
-        let s = state.step(&mut pool, &f.config, Some(0.0));
+        let s = state.step(&mut pool, &f.config, Some(0.0), None);
         assert!(!s.done);
         assert_eq!(s.result, None, "match phase emits no result batch");
         state.cancel();
@@ -1088,7 +1104,7 @@ mod tests {
         let mut batches = Vec::new();
         let mut events = Vec::new();
         while !rematch.is_done() {
-            let s = rematch.step(&mut pool, &f.config, Some(now));
+            let s = rematch.step(&mut pool, &f.config, Some(now), None);
             now += 16.0;
             if let Some(batch) = s.result {
                 batches.push(batch);
@@ -1203,7 +1219,7 @@ mod tests {
         );
         let mut now = 0.0_f64;
         while !rematch.is_done() {
-            let s = rematch.step(&mut pool, &config, Some(now));
+            let s = rematch.step(&mut pool, &config, Some(now), None);
             now += 16.0;
             if s.done {
                 break;
@@ -1268,7 +1284,7 @@ mod tests {
         let mut now = 0.0_f64;
         let mut recomposed_rows = Vec::new();
         while !rematch.is_done() {
-            let s = rematch.step(&mut pool, &config, Some(now));
+            let s = rematch.step(&mut pool, &config, Some(now), None);
             now += 16.0;
             if let Some(batch) = s.result {
                 for row in batch.row_begin..batch.row_end {
@@ -1312,7 +1328,7 @@ mod tests {
         let mut events = Vec::new();
         let mut batches = Vec::new();
         while !rematch.is_done() {
-            let s = rematch.step(&mut pool, &f.config, Some(now));
+            let s = rematch.step(&mut pool, &f.config, Some(now), None);
             now += 16.0;
             if let Some(event) = s.progress {
                 events.push(event);

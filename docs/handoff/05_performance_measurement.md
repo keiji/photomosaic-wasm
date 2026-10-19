@@ -68,6 +68,7 @@
         "w_c": 1.0,
         "w_d": 0.25,
         "alpha": 0.85,
+        "main_blend": 0.2,
         "duplicate_de": 2.0,
         "duplicate_detail": 4.0,
         "row_batch": 8

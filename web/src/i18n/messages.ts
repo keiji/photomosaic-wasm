@@ -33,6 +33,11 @@ export const messages = {
   canceledDone: '生成をキャンセルしました',
   blockSizeLabel: 'ブロックサイズ',
   blockSizeUnit: 'px',
+  /** メイン画像ブレンドのスライダー(詳細設計書 4.6。数値は表示しない) */
+  mainBlendLabel: 'メイン画像に適合させる',
+  /** プレビューの操作案内(クリック/ドロップでメイン画像を変更) */
+  previewChangeLabel: 'メイン画像を変更する(クリックまたはドロップ)',
+  previewDropHint: 'クリックまたはドロップでメイン画像を変更できます',
   tilesRequiredHint: '構成画像を追加してください',
   tileDropHintEdit: 'クリックまたはここにドロップ(構成画像を追加・複数可)',
   tileSummary: (count: number): string => `構成画像: ${count} 枚`,

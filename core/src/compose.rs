@@ -12,6 +12,10 @@
 //!   線形 RGB 空間で: out = tile_px * ((1 - α) + α * block_mean / tile_mean)
 //!   ```
 //! - 半端ブロック(画像端)はクリップ描画
+//! - メイン画像ブレンド: `main_blend > 0` のとき、合成済みブロック画素の上に
+//!   元のメイン画像を不透明度 main_blend で重ねる(sRGB 空間での線形補間)。
+//!   0 でブレンドなし(純モザイク)。既定 0.2。部分合成・差分再合成・
+//!   エクスポートのすべてに同じブレンドが反映される
 //! - 内部計算は f64 に統一し、決定性を保証する(handoff/02 4 章)
 //! - 出力ピクセルのアルファは常に 255(ホスト側で白背景合成済みのため)
 
@@ -26,6 +30,8 @@ use crate::tile::{TileFeature, TilePool};
 ///   書き込みは指定行範囲のみ(M5 の部分描画・M6 の差分再合成に再利用する)
 /// - `assignments`: 全ブロックの割当表(None = 未確定ブロック)。未確定
 ///   ブロックは描画せずスキップする(M6 の差分再合成では既存の出力値を保持)
+/// - `main_rgba`: メイン画像(`main_blend` ブレンドの重ね合わせ元。詳細設計書
+///   4.6)。None または `config.main_blend == 0` の場合はブレンドしない
 /// - タイルがプールに存在しない場合(実行中の削除など)はそのブロックを
 ///   描画せずスキップする(出力バッファの既存値を保持)
 // M5 の部分描画(行範囲 + プログレスコールバック)を損ねないよう、
@@ -38,6 +44,7 @@ pub fn compose_rows(
     assignments: &[Option<u64>],
     pool: &TilePool,
     config: &MosaicConfig,
+    main_rgba: Option<&[u8]>,
     row_begin: u32,
     row_end: u32,
 ) {
@@ -58,6 +65,9 @@ pub fn compose_rows(
         features.len(),
         "assignment count mismatch"
     );
+    if let Some(main) = main_rgba {
+        assert_eq!(main.len(), width * height * 4, "main image length mismatch");
+    }
     let row_end = row_end.min(grid.rows);
 
     for row in row_begin..row_end {
@@ -70,18 +80,28 @@ pub fn compose_rows(
             let Some(tile) = pool.feature(tile_id) else {
                 continue;
             };
-            draw_block_cell(out, grid, &features[block_index], tile, pool, config);
+            draw_block_cell(
+                out,
+                grid,
+                &features[block_index],
+                tile,
+                pool,
+                config,
+                main_rgba,
+            );
         }
     }
 }
 
 /// 全体を一括合成する(P4 の一括実行。M4 で使用)。
+#[allow(clippy::too_many_arguments)]
 pub fn compose(
     grid: &GridInfo,
     features: &[BlockFeature],
     assignments: &[Option<u64>],
     pool: &TilePool,
     config: &MosaicConfig,
+    main_rgba: Option<&[u8]>,
 ) -> Vec<u8> {
     let size = usize::try_from(grid.width).expect("width fits usize")
         * usize::try_from(grid.height).expect("height fits usize")
@@ -94,6 +114,7 @@ pub fn compose(
         assignments,
         pool,
         config,
+        main_rgba,
         0,
         grid.rows,
     );
@@ -105,6 +126,10 @@ pub fn compose(
 /// - ブロック矩形は画像端でクリップしたサイズ(半端ブロック対応)
 /// - 色補正係数はブロックの CIELAB 平均を線形 RGB へ逆変換した平均で算出する
 ///   (BlockFeature は CIELAB で保持するため。タイルも同一手法)
+/// - メイン画像ブレンド(詳細設計書 4.6): `config.main_blend > 0` かつ
+///   `main_rgba` があるとき、色補正済みタイル画素の上にメイン画像を
+///   不透明度 main_blend で重ねる(sRGB 空間での線形補間)
+#[allow(clippy::too_many_arguments)]
 fn draw_block_cell(
     out: &mut [u8],
     grid: &GridInfo,
@@ -112,6 +137,7 @@ fn draw_block_cell(
     tile: &TileFeature,
     pool: &TilePool,
     config: &MosaicConfig,
+    main_rgba: Option<&[u8]>,
 ) {
     let width = usize::try_from(grid.width).expect("width fits usize");
     let block_size = usize::try_from(grid.block_size).expect("block size fits usize");
@@ -143,6 +169,11 @@ fn draw_block_cell(
             *factor = (1.0 - alpha) + alpha * (block_linear[c] / tile_linear[c]);
         }
     }
+
+    // メイン画像ブレンド(詳細設計書 4.6): main_blend = 0 ではブレンドしない
+    // (既定 0.2。sRGB 空間で out = tile * (1 - blend) + main * blend)
+    let blend = f64::from(config.main_blend);
+    let main_pixels = if blend > 0.0 { main_rgba } else { None };
 
     let lut = srgb8_linear_lut();
     let thumb_stride = usize::try_from(thumb_w).expect("thumb width fits usize") * 4;
@@ -207,7 +238,15 @@ fn draw_block_cell(
                     + w10 * lut[thumb[idx10 + c] as usize]
                     + w01 * lut[thumb[idx01 + c] as usize]
                     + w11 * lut[thumb[idx11 + c] as usize];
-                out[offset_out + c] = linear_to_srgb8(linear * factors[c]);
+                let mut value = linear_to_srgb8(linear * factors[c]);
+                if let Some(main) = main_pixels {
+                    // メイン画像ブレンド: 合成済み画素の上にメイン画像を重ねる。
+                    // 凸結合のため値は 0..255 に収まる(u8 への丸めで安全)
+                    let mixed =
+                        (1.0 - blend) * f64::from(value) + blend * f64::from(main[offset_out + c]);
+                    value = mixed.round() as u8;
+                }
+                out[offset_out + c] = value;
             }
             out[offset_out + 3] = 255;
         }
@@ -292,6 +331,7 @@ mod tests {
             &assignments,
             &pool,
             &MosaicConfig::default(),
+            None,
         );
         assert_eq!(out.len(), 24 * 24 * 4);
         assert!(out.as_chunks::<4>().0.iter().all(|px| px[3] == 255));
@@ -307,7 +347,7 @@ mod tests {
             color_correct: 0.0,
             ..MosaicConfig::default()
         };
-        let out = compose(&grid, &features, &assignments, &pool, &config);
+        let out = compose(&grid, &features, &assignments, &pool, &config, None);
         assert!(out
             .as_chunks::<4>()
             .0
@@ -327,7 +367,7 @@ mod tests {
             color_correct: 1.0,
             ..MosaicConfig::default()
         };
-        let out = compose(&grid, &features, &assignments, &pool, &config);
+        let out = compose(&grid, &features, &assignments, &pool, &config, None);
 
         let mut sum = [0.0_f64; 3];
         for pixel in out.as_chunks::<4>().0 {
@@ -408,7 +448,7 @@ mod tests {
             color_correct: 1.0,
             ..MosaicConfig::default()
         };
-        let out = compose(&grid, &features, &assignments, &pool, &config);
+        let out = compose(&grid, &features, &assignments, &pool, &config, None);
 
         // 出力(24×24)の周囲重み付き平均(中央区画 [6,18) は重み 1、周囲は
         // TILE_BORDER_WEIGHT)がブロック平均(線形 RGB)と一致する
@@ -460,6 +500,80 @@ mod tests {
     }
 
     #[test]
+    fn main_blend_zero_keeps_tile_output() {
+        // main_blend = 0: メイン画像があってもブレンドせず、タイルのみの出力
+        let (grid, features) = uniform_grid(24, 24, 24, [50.0, 0.0, 0.0]);
+        let pool = pool_with_flat_tile(1, [200, 100, 50]);
+        let assignments = vec![Some(1_u64); grid.total_blocks as usize];
+        let config = MosaicConfig {
+            main_blend: 0.0,
+            ..MosaicConfig::default()
+        };
+        let main_image = vec![90_u8; 24 * 24 * 4]; // ブレンド源があっても無視される
+        let out = compose(
+            &grid,
+            &features,
+            &assignments,
+            &pool,
+            &config,
+            Some(&main_image),
+        );
+
+        let reference = compose(&grid, &features, &assignments, &pool, &config, None);
+        assert_eq!(out, reference, "blend 0 must keep the tile-only output");
+    }
+
+    #[test]
+    fn main_blend_mixes_main_image_in_srgb_space() {
+        // main_blend = 0.8: out = 0.2 * タイル + 0.8 * メイン画像(sRGB 空間)。
+        // ブレンドなしの出力を基準に凸結合で検証する(詳細設計書 4.6)
+        let (grid, features) = uniform_grid(24, 24, 24, [50.0, 0.0, 0.0]);
+        let pool = pool_with_flat_tile(1, [200, 100, 50]);
+        let assignments = vec![Some(1_u64); grid.total_blocks as usize];
+        // メイン画像: 座標由来の決定的な色(ブレンド効果が一様にならないよう)
+        let mut main_image = vec![0_u8; 24 * 24 * 4];
+        for (i, pixel) in main_image.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let x = (i % 24) as u8;
+            let y = (i / 24) as u8;
+            pixel[0] = 30 + x * 4;
+            pixel[1] = 200 - y * 4;
+            pixel[2] = 128;
+            pixel[3] = 255;
+        }
+        let base_config = MosaicConfig {
+            main_blend: 0.0,
+            ..MosaicConfig::default()
+        };
+        let base = compose(&grid, &features, &assignments, &pool, &base_config, None);
+        let blend_config = MosaicConfig {
+            main_blend: 0.8,
+            ..MosaicConfig::default()
+        };
+        let blended = compose(
+            &grid,
+            &features,
+            &assignments,
+            &pool,
+            &blend_config,
+            Some(&main_image),
+        );
+
+        for (i, pixel) in blended.as_chunks::<4>().0.iter().enumerate() {
+            let expected = &base[i * 4..i * 4 + 4];
+            let main_pixel = &main_image[i * 4..i * 4 + 4];
+            for c in 0..3 {
+                let mixed = 0.2 * f64::from(expected[c]) + 0.8 * f64::from(main_pixel[c]);
+                assert!(
+                    (f64::from(pixel[c]) - mixed).abs() <= 1.0,
+                    "pixel {i} channel {c}: got {} expected {mixed}",
+                    pixel[c]
+                );
+            }
+            assert_eq!(pixel[3], 255);
+        }
+    }
+
+    #[test]
     fn partial_edge_blocks_are_clipped() {
         // 30x30 / block 24 → 右下が半端(6x6)。クリップ描画で全体が覆われること
         let (grid, features) = uniform_grid(30, 30, 24, [50.0, 0.0, 0.0]);
@@ -469,7 +583,7 @@ mod tests {
             color_correct: 0.0,
             ..MosaicConfig::default()
         };
-        let out = compose(&grid, &features, &assignments, &pool, &config);
+        let out = compose(&grid, &features, &assignments, &pool, &config, None);
         assert_eq!(out.len(), 30 * 30 * 4);
         assert!(out
             .as_chunks::<4>()
@@ -501,7 +615,7 @@ mod tests {
             color_correct: 0.0,
             ..MosaicConfig::default()
         };
-        let out = compose(&grid, &features, &assignments, &pool, &config);
+        let out = compose(&grid, &features, &assignments, &pool, &config, None);
         let at = |x: usize, y: usize| -> [u8; 3] {
             let offset = (y * 16 + x) * 4;
             [out[offset], out[offset + 1], out[offset + 2]]
@@ -536,6 +650,7 @@ mod tests {
             &assignments,
             &pool,
             &config,
+            None,
             0,
             1,
         );
@@ -567,6 +682,7 @@ mod tests {
                 color_correct: 0.0,
                 ..MosaicConfig::default()
             },
+            None,
             0,
             grid.rows,
         );
@@ -638,11 +754,13 @@ mod tests {
         pool.reset_usage();
         let matches = crate::match_engine::match_blocks(&features, grid.cols, &mut pool, &config);
         let assignments: Vec<Option<u64>> = matches.iter().map(|m| Some(m.tile_id)).collect();
-        let out = compose(&grid, &features, &assignments, &pool, &config);
+        // 本番と同一条件: 既定 main_blend(0.2)でメイン画像(上で生成した rgba)を
+        // ブレンドした結果をハッシュ比較する
+        let out = compose(&grid, &features, &assignments, &pool, &config, Some(&rgba));
         assert_eq!(out.len(), 32 * 32 * 4);
         assert_eq!(
             fnv1a64(&out),
-            0x766A_173A_06CF_D149, // 重複グループ(使用ペナルティのグループ合計化)の導入でマッチが変化
+            0x1C81_A55A_8493_95D1, // メイン画像ブレンド(main_blend)の導入で出力が変化
             "golden hash mismatch: inspect intentional spec changes and update this value"
         );
     }

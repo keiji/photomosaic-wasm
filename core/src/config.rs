@@ -43,6 +43,11 @@ pub struct MosaicConfig {
     /// 0.7 → 0.85 への引き上げは、タイル代表色の周囲重み付き平均化(詳細設計書
     /// 4.3)と組み合わせて背景の継ぎ目・粒状感(つぶつぶ)を抑える趣旨
     pub color_correct: f32,
+    /// メイン画像のブレンド不透明度 main_blend(詳細設計書 4.6)。既定 0.2、範囲 0〜0.8。
+    /// 合成済みブロック画素の上に元のメイン画像を不透明度 main_blend で重ねる
+    /// (0 でブレンドなし=純モザイク。値が大きいほどメイン画像が強く現れ、
+    /// タイルの模様は薄れる)
+    pub main_blend: f32,
     /// 進捗・部分描画の行バッチ単位 row_batch。既定 8 行、範囲 4〜32
     pub row_batch: u32,
 }
@@ -77,6 +82,7 @@ impl Default for MosaicConfig {
             duplicate_detail: 4.0,
             usage_cap: 4,
             color_correct: 0.85,
+            main_blend: 0.2,
             row_batch: 8,
         }
     }
@@ -149,6 +155,13 @@ impl MosaicConfig {
                 requirement: "must be in 0.0..=1.0",
             });
         }
+        finite_in_range(
+            self.main_blend,
+            0.0,
+            0.8,
+            "main_blend",
+            "must be in 0.0..=0.8",
+        )?;
         if !(4..=32).contains(&self.row_batch) {
             return Err(ConfigError {
                 field: "row_batch",
@@ -177,6 +190,7 @@ mod tests {
         assert_eq!(config.duplicate_detail, 4.0);
         assert_eq!(config.usage_cap, 4);
         assert_eq!(config.color_correct, 0.85);
+        assert_eq!(config.main_blend, 0.2);
         assert_eq!(config.row_batch, 8);
     }
 
@@ -251,6 +265,13 @@ mod tests {
                 },
                 "duplicate_detail",
             ),
+            (
+                MosaicConfig {
+                    main_blend: 0.9,
+                    ..MosaicConfig::default()
+                },
+                "main_blend",
+            ),
         ];
         for (config, field) in cases {
             let err = config.validate().expect_err("must be rejected");
@@ -272,6 +293,7 @@ mod tests {
             duplicate_detail: 0.0,
             usage_cap: 0,
             color_correct: 1.0,
+            main_blend: 0.0,
             row_batch: 32,
         };
         assert_eq!(config.validate(), Ok(()));
@@ -280,6 +302,7 @@ mod tests {
             improve_margin: 2.0,
             duplicate_de: 8.0,
             duplicate_detail: 32.0,
+            main_blend: 0.8,
             row_batch: 4,
             ..MosaicConfig::default()
         };

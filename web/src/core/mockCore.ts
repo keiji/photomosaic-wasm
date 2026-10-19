@@ -103,6 +103,7 @@ export function createMockCore(): CoreBridge {
     duplicate_detail: 4.0,
     usage_cap: 4,
     color_correct: 0.85,
+    main_blend: 0.2,
     row_batch: 8,
   };
 

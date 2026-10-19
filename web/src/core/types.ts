@@ -94,6 +94,8 @@ export interface MosaicConfig {
   usage_cap: number;
   /** 色補正強度 α。既定 0.85、範囲 0〜1.0(分母はタイルの周囲重み付き代表色) */
   color_correct: number;
+  /** メイン画像ブレンドの不透明度。既定 0.2、範囲 0〜0.8(詳細設計書 4.6) */
+  main_blend: number;
   /** 行バッチ単位。既定 8、範囲 4〜32 */
   row_batch: number;
 }

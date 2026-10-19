@@ -12,10 +12,16 @@ export const BLOCK_SIZE_DEBOUNCE_MS = 300;
 export const BLOCK_SIZE_MIN = 8;
 export const BLOCK_SIZE_MAX = 128;
 
+/** メイン画像ブレンドの範囲・刻み(詳細設計書 5 章 main_blend。数値表示なし) */
+export const MAIN_BLEND_MIN = 0;
+export const MAIN_BLEND_MAX = 0.8;
+export const MAIN_BLEND_STEP = 0.05;
+
 export class Controls {
   private readonly root: HTMLElement;
   private readonly slider: HTMLInputElement;
   private readonly output: HTMLOutputElement;
+  private readonly mainBlendSlider: HTMLInputElement;
   private readonly saveButton: HTMLButtonElement;
   private readonly backButton: HTMLButtonElement;
   private readonly generateButton: HTMLButtonElement;
@@ -23,12 +29,14 @@ export class Controls {
 
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private onBlockSizeChange: (px: number) => void = () => {};
+  private onMainBlendChange: (value: number) => void = () => {};
   private pendingValue: number | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
     this.slider = this.require<HTMLInputElement>('#block-size-slider');
     this.output = this.require<HTMLOutputElement>('#block-size-value');
+    this.mainBlendSlider = this.require<HTMLInputElement>('#main-blend-slider');
     this.saveButton = this.require<HTMLButtonElement>('#save-button');
     this.backButton = this.require<HTMLButtonElement>('#back-button');
     this.generateButton = this.require<HTMLButtonElement>('#generate-button');
@@ -41,6 +49,12 @@ export class Controls {
       this.output.textContent = this.formatSize(px);
       this.scheduleDebounce(px);
     });
+
+    // メイン画像ブレンド: ドラッグ中(input)は再計算せず、確定(マウスを
+    // 離した = change)したタイミングでのみ再計算を依頼する
+    this.mainBlendSlider.addEventListener('change', () => {
+      this.onMainBlendChange(Number(this.mainBlendSlider.value));
+    });
   }
 
   /** ブロックサイズの表示値を設定する(イベント発火なし) */
@@ -52,6 +66,16 @@ export class Controls {
   /** ブロックサイズ変更のコールバックを登録する(デバウンス後に呼ばれる) */
   handleBlockSizeChange(handler: (px: number) => void): void {
     this.onBlockSizeChange = handler;
+  }
+
+  /** メイン画像ブレンドの表示値を設定する(イベント発火なし。リセット用) */
+  setMainBlendValue(value: number): void {
+    this.mainBlendSlider.value = String(value);
+  }
+
+  /** メイン画像ブレンド確定(マウスを離した)のコールバックを登録する */
+  handleMainBlendChange(handler: (value: number) => void): void {
+    this.onMainBlendChange = handler;
   }
 
   /** 保存・戻るの各操作を登録する(戻るがリセットを兼ねる) */

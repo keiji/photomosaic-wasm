@@ -66,6 +66,12 @@ function applyMessages(): void {
   requireElement<HTMLButtonElement>('#generate-button').textContent = messages.generate;
   requireElement<HTMLButtonElement>('#cancel-button').textContent = messages.cancel;
   requireElement<HTMLElement>('#tiles-required-hint').textContent = messages.tilesRequiredHint;
+  requireElement<HTMLElement>('#main-blend-label').textContent = messages.mainBlendLabel;
+  requireElement<HTMLElement>('#preview-hint').textContent = messages.previewDropHint;
+  requireElement<HTMLDivElement>('#preview-frame').setAttribute(
+    'aria-label',
+    messages.previewChangeLabel,
+  );
   requireElement<HTMLCanvasElement>('#preview-canvas').setAttribute(
     'aria-label',
     messages.previewAriaLabel,
@@ -185,6 +191,46 @@ async function main(): Promise<void> {
         // TILES_READY からメイン画像を設定すると自動開始(基本設計書 1.4)
         if (store.getData().state === 'GENERATING') {
           await startGeneration();
+        }
+      } catch (err) {
+        if (err instanceof InvalidFileError) {
+          showError(messages.errorInvalidFile);
+        } else {
+          showError(messages.errorLoadFailed);
+        }
+        progress.reset();
+      }
+    },
+  });
+
+  // --- S2: プレビューへのドロップ/クリックでメイン画像を変更する(基本設計書 3.3) ---
+  // 全処理をリセットしてやり直す(タイルプールは維持)。構成画像があれば
+  // ブロックサイズ変更と同じく自動でフル再生成する
+  setupFileZone(requireElement<HTMLElement>('#preview-frame'), {
+    multiple: false,
+    onFiles: async (files) => {
+      const file = files[0];
+      if (!file) return;
+      clearError();
+      // 実行中の生成は要求の合流(詳細設計書 7.5)で停止してから差し替える
+      generation += 1;
+      core.cancel();
+      progress.setPhase(messages.phaseLoadMain);
+      try {
+        const image = await loadMainImage(file);
+        if (image.scaled) {
+          showError(messages.mainShrunkNotice(4096));
+        }
+        const grid = await core.setMainImage(image);
+        store.dispatch({ type: 'MAIN_IMAGE_SET' });
+        store.setBlockCounts(grid.totalBlocks, 0);
+        currentGrid = grid;
+        preview.drawGrid(grid, core.getBlockMeanColors());
+        progress.setPhase(messages.phaseMainAnalyze);
+        if (store.getData().tileCount > 0) {
+          store.dispatch({ type: 'GENERATION_STARTED' });
+          progress.setCounts(0, grid.totalBlocks);
+          await executeRun('full');
         }
       } catch (err) {
         if (err instanceof InvalidFileError) {
@@ -376,6 +422,24 @@ async function main(): Promise<void> {
     }
   });
 
+  // --- S2: メイン画像ブレンド(詳細設計書 4.6)。
+  // ドラッグ中は再計算せず、確定(マウスを離した)タイミングで設定を更新し
+  // フル再生成する(実行中の生成は要求の合流 7.5 でキャンセル後に再開) ---
+  controls.handleMainBlendChange(async (value) => {
+    const config = await core.getConfig();
+    await core.setConfig({ ...config, main_blend: value });
+    if (currentGrid === null || store.getData().tileCount === 0) {
+      return; // 再計算の対象がない(メイン画像またはタイル未設定)
+    }
+    if (store.getData().state === 'GENERATING') {
+      generation += 1;
+      core.cancel();
+    }
+    store.dispatch({ type: 'GENERATION_STARTED' });
+    progress.setCounts(0, currentGrid.totalBlocks);
+    await executeRun('full');
+  });
+
   /**
    * 生成・差分再マッチの共通完了処理。
    * 呼び出し時点の世代で完了を判定する(実行中の変更要求は generation を
@@ -503,6 +567,17 @@ async function main(): Promise<void> {
     progress.reset();
     metricsOverlay.clear();
     controls.setBlockSizeValue(24);
+    // メイン画像ブレンドも初期化する(スライダー UI とコア設定の整合)。
+    // コア設定はセッションをまたいで保持されるため、ここで明示的に戻す
+    controls.setMainBlendValue(0.2);
+    void (async () => {
+      try {
+        const config = await core.getConfig();
+        await core.setConfig({ ...config, main_blend: 0.2 });
+      } catch (err) {
+        console.warn('config reset failed', err);
+      }
+    })();
   };
   controls.handleBack(reset);
 

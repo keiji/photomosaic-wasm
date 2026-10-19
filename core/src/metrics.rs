@@ -143,6 +143,8 @@ pub struct RunRecord {
     /// 類似タイルの同一視閾値(P3 の重複グループに影響。詳細設計書 4.4)
     pub duplicate_de: f32,
     pub duplicate_detail: f32,
+    /// メイン画像ブレンドの不透明度(P4 の出力に影響。詳細設計書 4.6)
+    pub main_blend: f32,
     pub color_correct: f32,
     pub row_batch: u32,
 }
@@ -304,6 +306,7 @@ fn format_run_json(run: &RunRecord) -> String {
         ("w_c", run.w_c),
         ("w_d", run.w_d),
         ("alpha", run.color_correct),
+        ("main_blend", run.main_blend),
         ("duplicate_de", run.duplicate_de),
         ("duplicate_detail", run.duplicate_detail),
         ("row_batch", run.row_batch as f32),
@@ -400,6 +403,7 @@ mod tests {
             neighbor_penalty: 0.5,
             duplicate_de: 2.0,
             duplicate_detail: 4.0,
+            main_blend: 0.2,
             color_correct: 0.7,
             row_batch: 8,
         };
@@ -419,6 +423,7 @@ mod tests {
         );
         assert!(json.contains("\"tiles_bytes\":19660800"));
         assert!(json.contains("\"alpha\":0.700"));
+        assert!(json.contains("\"main_blend\":0.200"));
         assert!(json.contains("\"duplicate_de\":2.000"));
         assert!(json.contains("\"duplicate_detail\":4.000"));
     }
