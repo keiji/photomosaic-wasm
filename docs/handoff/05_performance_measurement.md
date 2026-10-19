@@ -159,6 +159,12 @@
 | 2026-10-19 | S-large(4000×3000・タイル 2,000 枚・block 24、同環境) | 198 ms | 73 ms | 7,367 ms | 1,549 ms | 9,187 ms | コア内部メトリクス。`run` 実測 15,111 ms、メイン設定 325 ms、タイル追加 105,342 ms。isolate のメモリ上限内で完了(`tiles_bytes=2,048,000`) |
 | 2026-10-19 | アプリ層メモリ(4096×3072 の Bitmap + タイル 50 枚、ViewModel + 実エンジン) | - | - | - | - | - | 12MP 画像の生成が完了。Bitmap の画素データはネイティブヒープに置かれるため、Java ヒープとは分けて評価する |
 | 2026-10-19 | evaluate フォールバックの 12MP 応答 | - | - | - | - | - | `ByteArrayOutputStream` の伸長と `toByteArray()` の複製で Java ヒープが OOM。応答長を先に受けて最終サイズの `ByteArray` を一度だけ確保する方式へ変更して解消 |
+| 2026-10-19 | A4-01 タイル一括登録(300 枚、S-mid と同条件、android-36 エミュレータ) | 166 ms | 12 ms | 776 ms | 1,303 ms | 2,257 ms | `addTiles` control 導入後。タイル追加 181 ms(導入前 15,870 ms)。`run` 実測 7,292 ms |
+| 2026-10-19 | A4-01 タイル一括登録(2,000 枚、S-large と同条件、android-36 エミュレータ) | 174 ms | 31 ms | 6,279 ms | 1,293 ms | 7,777 ms | `addTiles` control 導入後。タイル追加 717 ms(導入前 105,342 ms)。`run` 実測 12,531 ms |
+| 2026-10-19 | A4-01/A4-02 S-mid(Pixel 8a、Android 37、WebView 155、message_port) | 391 ms | 89 ms | 1,535 ms | 2,979 ms | 4,994 ms | タイル追加 660 ms、メイン設定 716 ms、`run` 実測 5,690 ms |
+| 2026-10-19 | A4-01/A4-02 S-large(Pixel 8a、Android 37、WebView 155、message_port) | 365 ms | 113 ms | 10,112 ms | 3,079 ms | 13,669 ms | タイル追加 1,885 ms、メイン設定 484 ms、`run` 実測 14,739 ms、`tiles_bytes=2,048,000` |
 
 - Android のタイル追加は evaluate フォールバックでは 1 枚ごとに制御要求が発生する。300 枚で約 15.9 秒、2,000 枚で約 105 秒。UI は進捗を表示するが、タイル一括登録 API は A4 のフィードバック候補。
-- S-mid の P4 はデスクトップ目標 1,000 ms を超えるが、Android 実機の絶対目標値は設定しない(§7)。
+- A4-01 の `addTiles` control 導入後は、エミュレータで 300 枚 181 ms、2,000 枚 717 ms。Pixel 8a では 300 枚 660 ms、2,000 枚 1,885 ms。
+- MessagePort の ArrayBuffer は Binder のサイズ上限を超えられない。48 MB の完成 RGBA を 1 メッセージで送ると `IllegalArgumentException: arrayBuffer is too large` になるため、JS → Kotlin も 512 KiB チャンクへ分割する。Pixel 8a の全 25 テストはこの方式で成功した。
+- S-mid の P4 はデスクトップ目標 1,000 ms を超えるが、Android 実機の絶対目標値は設定しない(§7)。Pixel 8a の P4 は 2.98 秒で、端末差による差が大きい。

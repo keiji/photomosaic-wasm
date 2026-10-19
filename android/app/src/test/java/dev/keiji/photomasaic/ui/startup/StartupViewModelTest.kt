@@ -6,7 +6,9 @@ import dev.keiji.photomasaic.core.GenerationEvent
 import dev.keiji.photomasaic.core.GridInfo
 import dev.keiji.photomasaic.core.MosaicConfig
 import dev.keiji.photomasaic.core.RgbaImage
+import dev.keiji.photomasaic.core.TileBatchResult
 import dev.keiji.photomasaic.core.TileInfo
+import dev.keiji.photomasaic.core.TileInput
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -89,6 +91,8 @@ private class FakeCoreEngine(
         feature: RgbaImage,
         compose: RgbaImage,
     ): TileInfo = notUsed()
+
+    override suspend fun addTiles(tiles: List<TileInput>): TileBatchResult = notUsed()
 
     override suspend fun removeTile(id: Long) = notUsed()
 

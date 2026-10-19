@@ -27,6 +27,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -235,31 +236,53 @@ class JsCoreEngine(
         feature: RgbaImage,
         compose: RgbaImage,
     ): TileInfo {
+        val result = addTiles(listOf(TileInput(id, feature, compose)))
+        return result.tiles.firstOrNull()
+            ?: throw CoreException(result.errors.firstOrNull() ?: "tile registration failed")
+    }
+
+    override suspend fun addTiles(tiles: List<TileInput>): TileBatchResult {
+        if (tiles.isEmpty()) {
+            return TileBatchResult(emptyList(), emptyList())
+        }
         val response =
             requestJson(
                 build = { requestId ->
-                    JSONObject()
-                        .put("type", "addTile")
-                        .put("tileId", id)
-                        .put("featureRef", "feature-$requestId")
-                        .put("composeRef", "compose-$requestId")
-                        .put(
-                            "meta",
+                    val array = JSONArray()
+                    tiles.forEachIndexed { index, tile ->
+                        array.put(
                             JSONObject()
-                                .put("featureWidth", feature.width)
-                                .put("featureHeight", feature.height)
-                                .put("composeWidth", compose.width)
-                                .put("composeHeight", compose.height),
+                                .put("tileId", tile.id)
+                                .put("featureRef", "feature-$requestId-$index")
+                                .put("composeRef", "compose-$requestId-$index")
+                                .put(
+                                    "meta",
+                                    JSONObject()
+                                        .put("featureWidth", tile.feature.width)
+                                        .put("featureHeight", tile.feature.height)
+                                        .put("composeWidth", tile.compose.width)
+                                        .put("composeHeight", tile.compose.height),
+                                ),
                         )
+                    }
+                    JSONObject()
+                        .put("type", "addTiles")
+                        .put("tiles", array)
                 },
                 namedData = { requestId ->
-                    listOf(
-                        "feature-$requestId" to feature.data,
-                        "compose-$requestId" to compose.data,
-                    )
+                    tiles.flatMapIndexed { index, tile ->
+                        listOf(
+                            "feature-$requestId-$index" to tile.feature.data,
+                            "compose-$requestId-$index" to tile.compose.data,
+                        )
+                    }
                 },
             )
-        return response.getJSONObject("tile").toTileInfo()
+        val tileArray = response.optJSONArray("tiles") ?: JSONArray()
+        val errorArray = response.optJSONArray("errors") ?: JSONArray()
+        val infos = List(tileArray.length()) { tileArray.getJSONObject(it).toTileInfo() }
+        val errors = List(errorArray.length()) { errorArray.getString(it) }
+        return TileBatchResult(infos, errors)
     }
 
     override suspend fun removeTile(id: Long) {
@@ -524,8 +547,7 @@ class JsCoreEngine(
     private fun prepareFallbackBuffer(length: Int) {
         fallbackExpectedLength = length
         fallbackOffset = 0
-        // MessagePort 経路では直後に ArrayBuffer が届くため、控えのバッファは確保しない
-        fallbackBuffer = if (messagePort == null && length > 0) ByteArray(length) else null
+        fallbackBuffer = if (length > 0) ByteArray(length) else null
     }
 
     private fun resetFallbackBuffer() {
@@ -535,12 +557,15 @@ class JsCoreEngine(
     }
 
     private fun appendFallbackChunk(data: String) {
+        appendBinaryChunk(Base64.decode(data, Base64.DEFAULT))
+    }
+
+    private fun appendBinaryChunk(decoded: ByteArray) {
         val expected = fallbackExpectedLength
         if (expected < 0) {
             throw CoreException("binary response length is missing")
         }
         val buffer = fallbackBuffer ?: ByteArray(expected).also { fallbackBuffer = it }
-        val decoded = Base64.decode(data, Base64.DEFAULT)
         if (fallbackOffset + decoded.size > expected) {
             throw CoreException("binary response is larger than declared length")
         }
@@ -643,6 +668,9 @@ class JsCoreEngine(
                         length = length,
                     )
                 prepareFallbackBuffer(length)
+                if (length == 0) {
+                    completeFallbackBinary()
+                }
             }
             "result" -> {
                 val length = json.optInt("length", -1)
@@ -653,6 +681,9 @@ class JsCoreEngine(
                         length = length,
                     )
                 prepareFallbackBuffer(length)
+                if (length == 0) {
+                    completeFallbackBinary()
+                }
             }
             "error" ->
                 activeGeneration?.trySend(
@@ -696,35 +727,8 @@ class JsCoreEngine(
         pending.json.complete(json)
     }
 
-    @Suppress("ReturnCount")
     private fun handleBinaryMessage(bytes: ByteArray) {
-        val binaryId = pendingBinaryRequestId
-        if (binaryId != null) {
-            pendingBinaryRequestId = null
-            pendingRequests.remove(binaryId)?.binary?.complete(bytes)
-            return
-        }
-        pendingBatchMeta?.let { meta ->
-            pendingBatchMeta = null
-            activeGeneration?.trySend(
-                GenerationEvent.Batch(
-                    ResultBatch(
-                        blockRowBegin = meta.rowBegin,
-                        blockRowEnd = meta.rowEnd,
-                        blockSize = meta.blockSize,
-                        width = meta.width,
-                        rgba = bytes,
-                    ),
-                ),
-            )
-            return
-        }
-        pendingResultMeta?.let { meta ->
-            pendingResultMeta = null
-            activeGeneration?.trySend(
-                GenerationEvent.Completed(RgbaImage(meta.width, meta.height, bytes)),
-            )
-        }
+        appendBinaryChunk(bytes)
     }
 
     private fun handleProgress(json: JSONObject) {

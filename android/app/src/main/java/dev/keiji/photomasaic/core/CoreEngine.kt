@@ -50,6 +50,12 @@ interface CoreEngine : AutoCloseable {
         compose: RgbaImage,
     ): TileInfo
 
+    /**
+     * タイルを一括登録する。
+     * 成功したタイルと、失敗したタイルのエラーを返す(部分成功を許容する)。
+     */
+    suspend fun addTiles(tiles: List<TileInput>): TileBatchResult
+
     /** プールからタイルを削除する */
     suspend fun removeTile(id: Long)
 

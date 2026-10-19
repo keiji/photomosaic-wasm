@@ -71,7 +71,7 @@ Kotlin(MessagePort 受信コールバック、または __pmDrain ポーリン�
 ```
 
 - 画像のデコード・縮小・PNG エンコードは Kotlin 側(プラットフォーム API)が担当する。サンドボックスには DOM/Canvas がないため、ホスト JS はピクセル配列の計算とメッセージングに専念する。
-- 大容量データをメッセージ文字列に含めない。MessagePort / named data 経路では RGBA などのバイト列を直接渡し、メッセージは参照(dataRef)のみを持つ。Base64 evaluate 経路では 512 KiB 単位のチャンクに分割する。
+- 大容量データをメッセージ文字列に含めない。Kotlin → JS は MessagePort / named data 経路で RGBA などのバイト列を直接渡し、メッセージは参照(dataRef)のみを持つ。JS → Kotlin は MessagePort 経路でも ArrayBuffer を 512 KiB 単位のチャンクに分割する(AndroidX JavaScriptEngine の ArrayBuffer は Binder のサイズ上限を超えられないため)。Base64 evaluate 経路も同じ 512 KiB チャンクを使う。
 
 ### 3.3 メッセージプロトコル(概要)
 
@@ -79,21 +79,22 @@ control メッセージの種別は、詳細設計書 2 章で凍結した論理
 
 | 種別 | 方向 | ペイロード(JSON) |
 |---|---|---|
-| control | Kotlin → JS | `{type: "setMainImage" \| "setBlockSize" \| "getBlockMeanColors" \| "addTile" \| "removeTile" \| "clearTiles" \| "clearMainImage" \| "getMetrics" \| "getConfig" \| "setConfig" \| "run" \| "rematch" \| "step" \| "cancel", id, dataRef?, meta?, config?}` |
+| control | Kotlin → JS | `{type: "setMainImage" \| "setBlockSize" \| "getBlockMeanColors" \| "addTile" \| "addTiles" \| "removeTile" \| "clearTiles" \| "clearMainImage" \| "getMetrics" \| "getConfig" \| "setConfig" \| "run" \| "rematch" \| "step" \| "cancel", id, dataRef?, meta?, config?, tiles?}` |
 | inputBegin / inputChunk | Kotlin → JS | MessagePort のバイナリ入力、または Base64 evaluate 経路。`{type: "inputBegin", id: "main-1", length}` の後に、MessagePort では ArrayBuffer、Base64 evaluate では `{type: "inputChunk", id: "main-1", data: "<base64>"}` を送る。Base64 チャンクは 512 KiB 以下 |
-| response | JS → Kotlin | `{type: "response", id, ok, grid?, tile?, config?, metrics?, binary?, length?, error?}`(binary 応答は JSON の直後に ArrayBuffer、または Base64 チャンク) |
+| response | JS → Kotlin | `{type: "response", id, ok, grid?, tile?, tiles?, errors?, config?, metrics?, binary?, length?, error?}`(binary 応答は JSON の直後に 512 KiB 以下の ArrayBuffer チャンク、または Base64 チャンク) |
 | progress | JS → Kotlin | `{type: "progress", phase_code, phase_ratio, overall_ratio, assigned_blocks, total_blocks}`(コアの ProgressEvent のフィールド名に一致。文言化は Kotlin 側リソースで行う) |
-| batchDone | JS → Kotlin | `{type: "batchDone", row_begin, row_end, block_size, width, length}` の直後に該当範囲の合成済み RGBA(ArrayBuffer または Base64 チャンク) |
-| result | JS → Kotlin | `{type: "result", width, height, length}` の直後に完成画像 RGBA(ArrayBuffer または Base64 チャンク) |
+| batchDone | JS → Kotlin | `{type: "batchDone", row_begin, row_end, block_size, width, length}` の直後に該当範囲の合成済み RGBA(512 KiB 以下の ArrayBuffer チャンク、または Base64 チャンク) |
+| result | JS → Kotlin | `{type: "result", width, height, length}` の直後に完成画像 RGBA(512 KiB 以下の ArrayBuffer チャンク、または Base64 チャンク) |
 | stepDone | JS → Kotlin | `{type: "stepDone"}`(1 バッチ完了。Kotlin は `step` を返して次バッチを駆動する) |
 | error / canceled | JS → Kotlin | `{type: "error", message}` / `{type: "canceled"}` |
 
-- MessagePort 経路: Kotlin → JS は named data が使える場合 `provideNamedData` で渡し、メッセージには `dataRef` のみを含める。named data が無い場合は `inputBegin` の後に ArrayBuffer を MessagePort で送る。JS → Kotlin は JSON の直後に ArrayBuffer を MessagePort で送る。
+- MessagePort 経路: Kotlin → JS は named data が使える場合 `provideNamedData` で渡し、メッセージには `dataRef` のみを含める。named data が無い場合は `inputBegin` の後に ArrayBuffer を MessagePort で送る。JS → Kotlin は JSON の直後に 512 KiB 以下の ArrayBuffer チャンクを複数送り、`length` に達した時点で完了とする。
 - named data + evaluate 経路: 入力は `provideNamedData`、出力は `evaluateJavaScriptAsync("__pmDrain()")` のポーリングで受ける。JS は応答・進捗・バイナリを outbox に積み、バイナリは 512 KiB 単位の Base64 チャンクにする。
 - Base64 evaluate 経路: named data も MessagePort も使わない場合。入力は `inputBegin` + `inputChunk`、出力は named data + evaluate 経路と同じ outbox / Base64 チャンクを使う。
 - evaluate 経路の制御は `__pmHandleControl("<JSON>")`、受信は `__pmDrain()` を 16〜50ms 間隔でポーリングする。`stepDone` を受けたら `step` を送る。
 - 正確な API 名・サイズ上限は androidx.javascriptengine の公式ドキュメントを正とし、A0/A2-2 で実機確認の上、本書と詳細設計書へ反映する。
 - S2 の操作(ブロックサイズスライダー・タイル追加/削除の差分再マッチ・設定変更)を UI 仕様どおりに成立させるため、control 種別は凍結論理 API と同一の一式を用意する。進捗・部分結果の通知はバッチ駆動(`begin_run` / `step_run`)をホスト JS 内で担い、`step_run` の戻り値(progress / result)をメッセージへ変換する。サンドボックスに `setTimeout` が無いため、バッチ境界は `stepDone` → `step` の往復で作る。
+- タイル一括登録(`addTiles`)は `{type: "addTiles", tiles: [{tileId, featureRef, composeRef, meta}]}` を 1 回送り、JS 側で `wasm_bindgen.add_tile` を順に呼ぶ。応答は `{tiles: [...], errors: ["tile 3: ..."]}` とし、成功分と失敗理由を分けて返す。Kotlin はデコード済みのタイルをまとめて渡し、部分成功時も成功分を UI に反映する。
 
 ## 4. プロジェクトセットアップ(A0)
 
@@ -167,7 +168,7 @@ progress.collectAsState().value.let { event ->
 
 ### 6.1 A2 実施結果
 
-- プロトコル(`core/CoreModels.kt` / `core/JsCoreEngine.kt`): 制御は文字列 JSON、Kotlin → JS の RGBA は named data(`dataRef` のみを送る)、JS → Kotlin の部分結果・完成画像は JSON の直後に ArrayBuffer を送る方式で実装した。要求と応答は `id` で対応付け、60 秒でタイムアウトする。A2-2 で MessagePort 非対応時の evaluate フォールバックを追加した(§6.2)。
+- プロトコル(`core/CoreModels.kt` / `core/JsCoreEngine.kt`): 制御は文字列 JSON、Kotlin → JS の RGBA は named data(`dataRef` のみを送る)、JS → Kotlin の部分結果・完成画像は JSON の直後に 512 KiB 以下の ArrayBuffer チャンクを送る方式で実装した。要求と応答は `id` で対応付け、60 秒でタイムアウトする。A2-2 で MessagePort 非対応時の evaluate フォールバックを追加した(§6.2)。
 - バッチ駆動(`assets/host/host.js`): サンドボックスに `setTimeout` が無いため、`begin_run` / `begin_rematch` 後の 1 バッチごとに `stepDone` を送り、Kotlin が `step` を返すハンドシェイクでバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。進捗は `progress`、部分結果は `batchDone` + バイナリ、完成は `result` + バイナリとして送る。
 - 部分描画: `batchDone` の行範囲をグリッド全体の Bitmap へ `Canvas.drawBitmap` で転写し、`previewRevision` で Compose の再描画を促す。完成時は完成 RGBA を Bitmap 化して保存・共有に使う。
 - S2 UI(`ui/editor/EditorScreen.kt` / `EditorViewModel.kt`): プレビュー(タップでメイン画像変更)、ブロックサイズ(8〜128px、300ms デバウンス)、メイン画像ブレンド(0〜0.8)、色補正(0〜1.0)、重複閾値(0.5〜8.0)、進捗バー(割当/全体・フェーズ・開閉)、キャンセル、構成画像の追加/削除(編集中は差分再マッチ)、保存/共有、戻る(全状態クリア)を実装した。保存は完成時のみ有効。API 26〜28 では保存前に `WRITE_EXTERNAL_STORAGE` を要求する。
@@ -179,7 +180,7 @@ progress.collectAsState().value.let { event ->
 
 - 機能判定: `JavaScriptSandbox.isFeatureSupported` で WASM / MessagePort / named data / Promise / `EVALUATE_WITHOUT_TRANSACTION_LIMIT` / isolate max heap を起動時に確認し、結果を logcat に記録する。
 - トランスポート選択:
-  1. `JS_FEATURE_MESSAGE_PORTS` が使える場合は MessagePort 経路。入力は named data が使えれば `provideNamedData`、無ければ `inputBegin` + ArrayBuffer、出力は ArrayBuffer。
+  1. `JS_FEATURE_MESSAGE_PORTS` が使える場合は MessagePort 経路。入力は named data が使えれば `provideNamedData`、無ければ `inputBegin` + ArrayBuffer、出力は 512 KiB 以下の ArrayBuffer チャンク。
   2. MessagePort が無い場合は named data + evaluate 経路。入力は `provideNamedData`、出力は `__pmDrain()` のポーリングで受ける。
   3. named data も無い場合は Base64 evaluate 経路。入力は `inputBegin` / `inputChunk`、出力は Base64 チャンクで受ける。
 - MessagePort の機能フラグが true でも `createMessageChannel` が失敗する端末があるため、例外時は named data + evaluate へ落とす。
@@ -225,6 +226,7 @@ progress.collectAsState().value.let { event ->
 - アプリ層メモリ: 12MP(4096×3072)のメイン画像と 50 枚のタイルで ViewModel 経由の生成が完了することを確認した。Bitmap の画素データはネイティブヒープに置かれるため、Java ヒープの OOM とは別に監視する。
 - 判明した問題と修正: evaluate フォールバックで 12MP の完成 RGBA を受ける際、`ByteArrayOutputStream` の伸長と `toByteArray()` の複製で Java ヒープが OOM した。応答の `length` を先に受け取り、チャンク到着時に最終サイズの `ByteArray` を一度だけ確保する方式へ変更し、OOM を解消した。
 - `getMetrics` を Kotlin の `CoreEngine` と host.js の control に追加し、実機テストからメトリクス JSON を取得できるようにした。
+- A4-02 で Pixel 8a の MessagePort 経路を確認した。12MP の完成画像は 512 KiB の ArrayBuffer チャンクで受信する(§8.3)。
 
 ## 8. コア インターフェースへのフィードバック(A4、以後継続)
 
@@ -270,16 +272,48 @@ A4 は本書をフィードバックの正本として運用する。新しい�
 
 | ID | 課題 | 区分 | Web 再現 | 優先度 | 次アクション | 状態 |
 |---|---|---|---|---|---|---|
-| A4-01 | evaluate 経路のタイル登録が 1 枚ごとの制御要求で遅い(300 枚 約 15.9 秒、2,000 枚 約 105 秒) | HOST / CORE | 未確認(Web は直接呼び出しのため再現しない見込み) | P1 | タイル一括登録の control とコア API を設計し、転送時間を再計測する | Open |
-| A4-02 | MessagePort 経路が実機未検証(エミュレータの WebView 133 は非対応) | QA | - | P1 | MessagePort 対応の実機で生成・進捗・キャンセルを確認する | Open |
-| A4-03 | S-mid の P4 が 1.58 秒で、デスクトップ目標 1.0 秒を超える | CORE / 未判定 | 未確認 | P2 | Web の同一条件と比較し、コア改善の要否を判定する | Open |
+| A4-01 | evaluate 経路のタイル登録が 1 枚ごとの制御要求で遅い(300 枚 約 15.9 秒、2,000 枚 約 105 秒) | HOST / CORE | 未確認(Web は直接呼び出しのため再現しない見込み) | P1 | `addTiles` control を実装し、転送時間を再計測する | Fixed(2026-10-19、§8.2) |
+| A4-02 | MessagePort 経路の実機確認が必要(エミュレータの WebView 133 は非対応) | QA | - | P1 | Pixel 8a で生成・進捗・キャンセルを確認する | Fixed(2026-10-19、§8.3) |
+| A4-03 | S-mid の P4 が 1.58 秒(エミュレータ)/ 2.98 秒(Pixel 8a)で、デスクトップ目標 1.0 秒を超える | CORE / 未判定 | 未確認 | P2 | Web の同一条件と比較し、コア改善の要否を判定する | Open |
 | A4-04 | API 26〜28 の `WRITE_EXTERNAL_STORAGE` 保存経路が未検証 | QA | - | P2 | API 26 / 28 エミュレータで保存・共有を確認する | Open |
 | A4-05 | 低メモリ実機での S-large(12MP・2,000 枚)が未検証 | QA | - | P2 | 2GB 級実機で生成完了と安全な失敗を確認する | Open |
 | A4-06 | Display P3 などの広色域入力の正規化が未検証 | SPEC / QA | 未確認 | P2 | P3 画像を Web / Android で比較し、sRGB 変換ルールを仕様化する | Open |
 | A4-07 | プロセス死後に編集状態を復元しない(起動画面から再初期化) | SPEC | - | P3 | 再初期化で許容するか、`SavedStateHandle` 等で復元するかを決定する | Open |
 | A4-08 | evaluate ポーラーがアイドル時も 16 / 50ms 間隔で動作する | HOST | - | P3 | アイドル時の停止・間隔延長を検討し、消費電力を測る | Open |
 | A4-09 | メトリクスは instrumentation テストからのみ取得できる | HOST | - | P3 | デバッグビルド限定の共有導線を検討する | Open |
-| A4-10 | WebView の機能差により選択されるトランスポートが端末ごとに異なる | QA | - | P3 | 実機マトリクスで feature 値と選択経路を記録する | Open |
+| A4-10 | WebView の機能差により選択されるトランスポートが端末ごとに異なる | QA | - | P3 | 実機マトリクスで feature 値と選択経路を記録する | Open(Pixel 8a は `message_port` を確認済み) |
+
+### 8.2 A4-01 実施結果(2026-10-19)
+
+- `addTiles` control を追加し、タイル登録を 1 回の制御要求にまとめた。バイナリは従来どおりタイルごとの named data / 入力バッファで渡し、JS 側で `wasm_bindgen.add_tile` を順に呼ぶ。
+- 応答は `{tiles: [...], errors: [...]}`。一部のタイルが失敗しても成功分を返し、Kotlin 側は成功分を UI に反映したうえでエラーを表示する。
+- Kotlin API に `TileInput` / `TileBatchResult` / `CoreEngine.addTiles()` を追加。`EditorViewModel` はタイルをデコードしてから一括登録する。既存の `addTile()` は互換のため一括 API へ委譲する。
+- `QualityTest` に一括登録と部分失敗のテストを追加。全 8 件が成功した。
+
+| 条件 | 変更前(1 枚ずつ) | 変更後(一括) | 短縮率 |
+|---|---:|---:|---:|
+| タイル 300 枚(エミュレータ) | 15,870 ms | 181 ms | 約 88 倍 |
+| タイル 2,000 枚(エミュレータ) | 105,342 ms | 717 ms | 約 147 倍 |
+| タイル 300 枚(Pixel 8a) | - | 660 ms | - |
+| タイル 2,000 枚(Pixel 8a) | - | 1,885 ms | - |
+
+- エミュレータは android-36(`medium_phone`)、WebView 133、`named_data_evaluate`。Pixel 8a は Android 37、WebView 155、`message_port`。数値は Kotlin 側の `addTiles` 呼び出し全体の実測。
+- バイナリ提供は依然としてタイルごとの参照単位であるため、Base64 evaluate 経路では入力側の evaluate 回数が残る。複数タイルを 1 つのバイナリブロブへ詰める最適化は、必要になった時点で別課題とする。
+
+### 8.3 A4-02 実施結果(2026-10-19)
+
+- Pixel 8a(Android 37、WebView 155、arm64-v8a)で機能値を確認: `wasm=true messagePort=true provideNamedData=true promise=true evaluateWithoutTransactionLimit=true isolateMaxHeap=true`。実際に `message_port` トランスポートが選択された。
+- 初回の S-mid 実行で、48 MB の完成 RGBA を 1 つの ArrayBuffer として送った際に `IllegalArgumentException: arrayBuffer is too large: 48000000` が発生した。AndroidX JavaScriptEngine の ArrayBuffer は Binder のサイズ上限を超えられないため、MessagePort 経路の JS → Kotlin バイナリも 512 KiB 単位の ArrayBuffer チャンクへ分割するよう修正した。
+- Kotlin 側は MessagePort / evaluate の双方で同じ受信バッファを使い、`length` に達した時点で完了とする。これにより 12MP の完成画像も MessagePort 経路で受信できる。
+- Pixel 8a で全 instrumentation テスト 25 件が成功した。`QualityTest` は 8 件成功。S-mid / S-large の実測は以下。
+
+| 条件(Pixel 8a) | P1 | P2 | P3 | P4 | コア合計 | `run` 実測 | メイン設定 | タイル追加 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| S-mid: 4000×3000、300 枚 | 391 ms | 89 ms | 1,535 ms | 2,979 ms | 4,994 ms | 5,690 ms | 716 ms | 660 ms |
+| S-large: 4000×3000、2,000 枚 | 365 ms | 113 ms | 10,112 ms | 3,079 ms | 13,669 ms | 14,739 ms | 484 ms | 1,885 ms |
+
+- Pixel 8a の P4 はエミュレータより遅い。端末差のため A4-03 の Web 比較とコア改善判定は継続する。
+- エミュレータ WebView 133 では MessagePort 非対応のため、引き続き evaluate フォールバックが使われる。
 
 ## 9. タスク一覧(チェックリスト)
 

@@ -396,11 +396,12 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 - コアは JavaScript エンジン サンドボックス(androidx.javascriptengine の `JavaScriptSandbox` / `JavaScriptIsolate`)内で実行する。サンドボックスはアプリとは別プロセスで動くため、処理中もアプリの UI スレッドは塞がない。
 - Kotlin ↔ ホスト JS の双方向通信は **MessagePort API** を第一選択とする(Kotlin → JS: 制御メッセージ。JS → Kotlin: 進捗・結果メッセージ)。
 - 起動時に `JavaScriptSandbox.isFeatureSupported` で WASM / MessagePort / named data / Promise / `EVALUATE_WITHOUT_TRANSACTION_LIMIT` / isolate max heap を確認し、利用可能な組み合わせでトランスポートを選ぶ。
-- MessagePort 経路では、Kotlin → JS の大容量データ(RGBA バイト列)は named data が使える場合は named data 提供 API で渡し、メッセージは JSON 文字列で参照(dataRef)のみを持つ。named data が無い場合は `inputBegin` の後に ArrayBuffer を MessagePort で送る。JS → Kotlin には named data の consume API が無いため、部分結果・完成画像は JSON メッセージの直後に ArrayBuffer を MessagePort で送る。
+- MessagePort 経路では、Kotlin → JS の大容量データ(RGBA バイト列)は named data が使える場合は named data 提供 API で渡し、メッセージは JSON 文字列で参照(dataRef)のみを持つ。named data が無い場合は `inputBegin` の後に ArrayBuffer を MessagePort で送る。JS → Kotlin には named data の consume API が無いため、部分結果・完成画像は JSON メッセージの直後に 512 KiB 以下の ArrayBuffer チャンクとして送る。AndroidX JavaScriptEngine の ArrayBuffer は Binder のサイズ上限を超えられないため、48 MB の完成画像を 1 メッセージで送ることはできない。
 - MessagePort 非対応時は named data + evaluate 経路を使う。入力は named data、出力は `evaluateJavaScriptAsync("__pmDrain()")` のポーリングで受け、バイナリは 512 KiB 単位の Base64 チャンクにする。
 - named data 非対応時は Base64 evaluate 経路を使う。入力は `inputBegin` / `inputChunk` でチャンク転送し、出力は named data + evaluate 経路と同じ outbox / Base64 チャンクを使う。
 - 画像のデコード・縮小・PNG エンコードは Kotlin 側(プラットフォーム API)が担当する。サンドボックスには DOM/Canvas がないため、内部はピクセル配列の計算に専念する。
 - バッチ駆動はホスト JS 内で `begin_run` / `step_run` を呼び、サンドボックスに `setTimeout` が無いため `stepDone` → `step` の往復でバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。
+- タイル登録は `addTiles` control で一括送信する。バイナリはタイルごとの named data / 入力バッファ参照で渡し、ホスト JS が `wasm_bindgen.add_tile` を順に呼ぶ。応答は成功分の `tiles` と失敗理由の `errors` を分けて返し、Kotlin 側は部分成功を UI に反映する。
 - キャンセルはコルーチンキャンセルに連動させ、選択中のトランスポート経由でホストの `cancel()` を呼ぶ。コアの `cancel()` は実行状態を破棄し、確定済みの合成結果を保持する。isolate は画面破棄時に close してリソースを解放する。
 
 ## 9. メモリ設計
@@ -411,7 +412,7 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 | タイル特徴 | 32×32 Lab ≈ 1 KB/枚 | 数万枚に耐える |
 | タイル合成サムネイル | 64×64 RGBA ≈ 16 KB/枚 × memory_guard(3,000 枚で約 48 MB) | 上限超過で解像度半減 |
 | WASM ヒープ | 初期 256 MB 相当 | 伸長は wasm-bindgen 既定に任せ、失敗時はエラーとして UI へ通知。Android ではサンドボックス(isolate)のメモリ上限(端末依存)があるため、実機での上限確認を品質確認に含める |
-| Android evaluate フォールバックの受信バッファ | 完成 RGBA と同サイズ | 応答の `length` を先に受け取り、チャンク到着時に最終サイズの `ByteArray` を一度だけ確保する。`ByteArrayOutputStream` の伸長と `toByteArray()` の複製による Java ヒープの倍化を避ける |
+| Android のバイナリ受信バッファ | 完成 RGBA と同サイズ | 応答の `length` を先に受け取り、チャンク到着時に最終サイズの `ByteArray` を一度だけ確保する。MessagePort / evaluate の双方で 512 KiB チャンクを同じバッファへ書き込み、`ByteArrayOutputStream` の伸長と `toByteArray()` の複製による Java ヒープの倍化を避ける |
 
 ## 10. 性能目標と計測
 

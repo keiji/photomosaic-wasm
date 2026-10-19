@@ -20,6 +20,7 @@ import dev.keiji.photomasaic.core.MosaicConfig
 import dev.keiji.photomasaic.core.ProgressEvent
 import dev.keiji.photomasaic.core.ResultBatch
 import dev.keiji.photomasaic.core.RgbaImage
+import dev.keiji.photomasaic.core.TileInput
 import dev.keiji.photomasaic.io.AndroidImageLoader
 import dev.keiji.photomasaic.io.ImageExporter
 import dev.keiji.photomasaic.io.ImageLoadException
@@ -215,8 +216,8 @@ class EditorViewModel(
         }
     }
 
-    /** 構成画像をまとめて追加する(1 枚ずつデコード・解析して一覧へ足す) */
-    @Suppress("ComplexCondition")
+    /** 構成画像をまとめて追加する(デコード後にコアへ一括登録する) */
+    @Suppress("ComplexCondition", "LongMethod")
     fun addTiles(uris: List<Uri>) {
         if (uris.isEmpty() || _uiState.value.loading != null) {
             return
@@ -224,6 +225,8 @@ class EditorViewModel(
         val session = sessionToken
         viewModelScope.launch {
             _uiState.update { it.copy(error = null, loading = EditorUiState.Loading(0, uris.size)) }
+            val inputs = mutableListOf<TileInput>()
+            val tiles = mutableListOf<TileUi>()
             var processed = 0
             for (uri in uris) {
                 try {
@@ -231,8 +234,8 @@ class EditorViewModel(
                     val feature = argbToRgba(loaded.feature)
                     val compose = bitmapToRgba(loaded.compose)
                     nextTileId += 1
-                    val info =
-                        core.addTile(
+                    inputs +=
+                        TileInput(
                             id = nextTileId,
                             feature = RgbaImage(FEATURE_SIZE, FEATURE_SIZE, feature),
                             compose =
@@ -242,20 +245,31 @@ class EditorViewModel(
                                     compose,
                                 ),
                         )
-                    if (session != sessionToken) {
-                        return@launch
-                    }
-                    val tile = TileUi(id = info.id, bitmap = loaded.compose)
-                    _uiState.update { state -> state.copy(tiles = state.tiles + tile) }
+                    tiles += TileUi(id = nextTileId, bitmap = loaded.compose)
                 } catch (err: ImageLoadException) {
                     Log.e(LOG_TAG, "failed to load tile", err)
                     _uiState.update { it.copy(error = EditorError.DecodeFailed) }
-                } catch (err: Exception) {
-                    Log.e(LOG_TAG, "failed to add tile", err)
-                    _uiState.update { it.copy(error = EditorError.CoreFailed) }
                 }
                 processed += 1
                 _uiState.update { it.copy(loading = EditorUiState.Loading(processed, uris.size)) }
+            }
+            if (session != sessionToken) {
+                return@launch
+            }
+            if (inputs.isNotEmpty()) {
+                try {
+                    val result = core.addTiles(inputs)
+                    result.errors.forEach { Log.e(LOG_TAG, "failed to add tile: $it") }
+                    if (result.errors.isNotEmpty()) {
+                        _uiState.update { it.copy(error = EditorError.CoreFailed) }
+                    }
+                    val byId = tiles.associateBy { it.id }
+                    val registered = result.tiles.mapNotNull { byId[it.id] }
+                    _uiState.update { state -> state.copy(tiles = state.tiles + registered) }
+                } catch (err: Exception) {
+                    Log.e(LOG_TAG, "failed to add tiles", err)
+                    _uiState.update { it.copy(error = EditorError.CoreFailed) }
+                }
             }
             _uiState.update { it.copy(loading = null) }
             val state = _uiState.value

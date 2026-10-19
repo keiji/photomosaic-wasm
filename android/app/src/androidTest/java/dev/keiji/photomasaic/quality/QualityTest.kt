@@ -14,6 +14,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.keiji.photomasaic.core.GenerationEvent
 import dev.keiji.photomasaic.core.JsCoreEngine
 import dev.keiji.photomasaic.core.RgbaImage
+import dev.keiji.photomasaic.core.TileInput
 import dev.keiji.photomasaic.io.AndroidImageLoader
 import dev.keiji.photomasaic.io.ImageExporter
 import kotlinx.coroutines.runBlocking
@@ -105,6 +106,27 @@ class QualityTest {
         }
 
     @Test
+    fun bulkRegistrationKeepsValidTilesWhenOneFails() =
+        runBlocking {
+            val engine = JsCoreEngine(context)
+            try {
+                assertTrue(engine.start() is dev.keiji.photomasaic.core.CoreStartupResult.Ready)
+                engine.setMainImage(patternedRgba(64, 48))
+                val valid = tileInputs(1).single()
+                val invalid =
+                    valid.copy(
+                        id = 2,
+                        feature = RgbaImage(31, 31, ByteArray(31 * 31 * BYTES_PER_PIXEL)),
+                    )
+                val result = engine.addTiles(listOf(valid, invalid))
+                assertEquals(1, result.tiles.size)
+                assertEquals(1, result.errors.size)
+            } finally {
+                engine.close()
+            }
+        }
+
+    @Test
     fun metricsReportAllPhasesAndConfiguration() =
         runBlocking {
             val engine = JsCoreEngine(context)
@@ -140,9 +162,7 @@ class QualityTest {
                 val mainMs = elapsedMs(mainStart)
 
                 val tileStart = System.nanoTime()
-                repeat(S_MID_TILES) { index ->
-                    addTile(engine, index + 1L)
-                }
+                engine.addTiles(tileInputs(S_MID_TILES))
                 val tileMs = elapsedMs(tileStart)
 
                 val runStart = System.nanoTime()
@@ -174,9 +194,7 @@ class QualityTest {
                 val mainMs = elapsedMs(mainStart)
 
                 val tileStart = System.nanoTime()
-                repeat(S_LARGE_TILES) { index ->
-                    addTile(engine, index + 1L)
-                }
+                engine.addTiles(tileInputs(S_LARGE_TILES))
                 val tileMs = elapsedMs(tileStart)
 
                 val runStart = System.nanoTime()
@@ -205,22 +223,19 @@ class QualityTest {
         tileCount: Int,
     ) {
         engine.setMainImage(patternedRgba(mainWidth, mainHeight))
-        repeat(tileCount) { index ->
-            addTile(engine, index + 1L)
-        }
+        engine.addTiles(tileInputs(tileCount))
     }
 
-    private suspend fun addTile(
-        engine: JsCoreEngine,
-        id: Long,
-    ) {
-        val seed = id.toInt()
-        engine.addTile(
-            id = id,
-            feature = patternedRgba(FEATURE_SIZE, FEATURE_SIZE, seed),
-            compose = patternedRgba(COMPOSE_SIZE, COMPOSE_SIZE, seed + 17),
-        )
-    }
+    private fun tileInputs(count: Int): List<TileInput> =
+        List(count) { index ->
+            val id = index + 1L
+            val seed = id.toInt()
+            TileInput(
+                id = id,
+                feature = patternedRgba(FEATURE_SIZE, FEATURE_SIZE, seed),
+                compose = patternedRgba(COMPOSE_SIZE, COMPOSE_SIZE, seed + 17),
+            )
+        }
 
     private suspend fun runAndHash(engine: JsCoreEngine): RunResult {
         val batchRanges = mutableListOf<IntRange>()

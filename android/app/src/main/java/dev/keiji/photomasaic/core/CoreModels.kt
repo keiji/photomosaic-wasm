@@ -47,6 +47,19 @@ data class TileInfo(
     val usage: Int,
 )
 
+/** 一括登録するタイル 1 枚分の入力(特徴量用 32×32 と合成用サムネイル) */
+data class TileInput(
+    val id: Long,
+    val feature: RgbaImage,
+    val compose: RgbaImage,
+)
+
+/** タイル一括登録の結果。成功分と、失敗したタイルのエラーを返す */
+data class TileBatchResult(
+    val tiles: List<TileInfo>,
+    val errors: List<String>,
+)
+
 /** マッチング・合成の設定(詳細設計書 5 章。キー名はコアの JSON と一致) */
 data class MosaicConfig(
     val wC: Float = 1.0f,

@@ -13,7 +13,9 @@ import dev.keiji.photomasaic.core.GridInfo
 import dev.keiji.photomasaic.core.MosaicConfig
 import dev.keiji.photomasaic.core.ProgressEvent
 import dev.keiji.photomasaic.core.RgbaImage
+import dev.keiji.photomasaic.core.TileBatchResult
 import dev.keiji.photomasaic.core.TileInfo
+import dev.keiji.photomasaic.core.TileInput
 import dev.keiji.photomasaic.io.ImageExporter
 import dev.keiji.photomasaic.io.ImageLoadException
 import dev.keiji.photomasaic.io.ImageLoader
@@ -171,6 +173,14 @@ private class FakeCoreEngine : CoreEngine {
             detail = 0f,
             usage = 0,
         )
+
+    override suspend fun addTiles(tiles: List<TileInput>): TileBatchResult {
+        val infos = mutableListOf<TileInfo>()
+        for (tile in tiles) {
+            infos += addTile(tile.id, tile.feature, tile.compose)
+        }
+        return TileBatchResult(infos, emptyList())
+    }
 
     override suspend fun removeTile(id: Long) = Unit
 

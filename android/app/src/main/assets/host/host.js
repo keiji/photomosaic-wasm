@@ -164,7 +164,11 @@ function pmPost(message) {
 
 function pmPostBinary(bytes) {
   if (pmPort) {
-    pmPort.postMessage(bytes.buffer);
+    // MessagePort の ArrayBuffer は Binder のサイズ上限を超えられないため、
+    // evaluate 経路と同じ 512 KiB 単位で分割して送る。
+    for (let offset = 0; offset < bytes.length; offset += PM_CHUNK_BYTES) {
+      pmPort.postMessage(bytes.slice(offset, offset + PM_CHUNK_BYTES).buffer);
+    }
     return;
   }
   for (let offset = 0; offset < bytes.length; offset += PM_CHUNK_BYTES) {
@@ -321,6 +325,31 @@ async function pmHandleControl(message) {
           message.meta.composeHeight
         );
         pmRespond(message.id, { tile: pmTileToObject(info) });
+        break;
+      }
+      case 'addTiles': {
+        const added = [];
+        const errors = [];
+        const tiles = Array.isArray(message.tiles) ? message.tiles : [];
+        for (let index = 0; index < tiles.length; index += 1) {
+          const tile = tiles[index];
+          try {
+            const feature = await pmConsume(tile.featureRef);
+            const compose = await pmConsume(tile.composeRef);
+            const info = wasm_bindgen.add_tile(
+              BigInt(tile.tileId),
+              feature,
+              compose,
+              tile.meta.composeWidth,
+              tile.meta.composeHeight
+            );
+            added.push(pmTileToObject(info));
+          } catch (err) {
+            const errorText = String(err && err.message ? err.message : err);
+            errors.push('tile ' + index + ': ' + errorText);
+          }
+        }
+        pmRespond(message.id, { tiles: added, errors: errors });
         break;
       }
       case 'removeTile': {
