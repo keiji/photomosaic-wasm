@@ -395,9 +395,10 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 
 - コアは JavaScript エンジン サンドボックス(androidx.javascriptengine の `JavaScriptSandbox` / `JavaScriptIsolate`)内で実行する。サンドボックスはアプリとは別プロセスで動くため、処理中もアプリの UI スレッドは塞がない。
 - Kotlin ↔ ホスト JS の双方向通信は **MessagePort API** を使用する(Kotlin → JS: 制御メッセージ。JS → Kotlin: 進捗・結果メッセージ)。
-- 大容量データ(画像の RGBA バイト列・完成画像)はメッセージに含めず、named data 提供 API(バイト配列)で受け渡し、メッセージは JSON 文字列で参照(dataRef)のみを持つ。
+- Kotlin → JS の大容量データ(RGBA バイト列)はメッセージに含めず、named data 提供 API で渡し、メッセージは JSON 文字列で参照(dataRef)のみを持つ。JS → Kotlin には named data の consume API が無いため、部分結果・完成画像は JSON メッセージの直後に ArrayBuffer を MessagePort で送る。
 - 画像のデコード・縮小・PNG エンコードは Kotlin 側(プラットフォーム API)が担当する。サンドボックスには DOM/Canvas がないため、内部はピクセル配列の計算に専念する。
-- キャンセルはコルーチンキャンセルに連動させ、MessagePort 経由でホストの `cancel()` を呼ぶ。isolate は画面破棄時に close してリソースを解放する。
+- バッチ駆動はホスト JS 内で `begin_run` / `step_run` を呼び、サンドボックスに `setTimeout` が無いため `stepDone` → `step` の MessagePort 往復でバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。
+- キャンセルはコルーチンキャンセルに連動させ、MessagePort 経由でホストの `cancel()` を呼ぶ。コアの `cancel()` は実行状態を破棄し、確定済みの合成結果を保持する。isolate は画面破棄時に close してリソースを解放する。
 
 ## 9. メモリ設計
 

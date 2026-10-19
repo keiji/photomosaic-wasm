@@ -10,9 +10,7 @@ internal fun EditorEmptyPreview() {
     PhotomosaicTheme {
         EditorScreen(
             state = EditorUiState(coreVersion = "photomosaic-core 0.1.0"),
-            onMainImageSelected = {},
-            onTilesSelected = {},
-            onRemoveTile = {},
+            actions = EditorActions(),
         )
     }
 }

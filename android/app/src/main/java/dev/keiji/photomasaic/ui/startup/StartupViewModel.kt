@@ -38,7 +38,7 @@ sealed interface StartupUiState {
 
 /** 起動検査の状態を保持する ViewModel(A0)。 */
 class StartupViewModel(
-    private val engine: CoreEngine,
+    val engine: CoreEngine,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow<StartupUiState>(StartupUiState.Checking)
     val uiState: StateFlow<StartupUiState> = _uiState.asStateFlow()

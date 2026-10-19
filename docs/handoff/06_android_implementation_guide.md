@@ -76,14 +76,17 @@ control メッセージの種別は、詳細設計書 2 章で凍結した論理
 
 | 種別 | 方向 | ペイロード(JSON) |
 |---|---|---|
-| control | Kotlin → JS | `{type: "setMainImage" \| "setBlockSize" \| "addTile" \| "removeTile" \| "clearTiles" \| "run" \| "rematch" \| "cancel" \| "getConfig" \| "setConfig" \| "exportImage" \| "getVersion", dataRef: "...", meta: {...}}` |
+| control | Kotlin → JS | `{type: "setMainImage" \| "setBlockSize" \| "getBlockMeanColors" \| "addTile" \| "removeTile" \| "clearTiles" \| "clearMainImage" \| "getConfig" \| "setConfig" \| "run" \| "rematch" \| "step" \| "cancel", id?, dataRef?, meta?, config?}` |
+| response | JS → Kotlin | `{type: "response", id, ok, grid?, tile?, config?, binary?, length?, error?}`(binary 応答は JSON の直後に ArrayBuffer) |
 | progress | JS → Kotlin | `{type: "progress", phase_code, phase_ratio, overall_ratio, assigned_blocks, total_blocks}`(コアの ProgressEvent のフィールド名に一致。文言化は Kotlin 側リソースで行う) |
-| batchDone | JS → Kotlin | `{type: "batchDone", rows: [begin, end], dataSize, dataRef: "..."}`(該当範囲の合成済み RGBA) |
-| result | JS → Kotlin | `{type: "result", dataRef: "..."}`(完成画像 RGBA) |
-| error | JS → Kotlin | `{type: "error", code, message}`(コア呼び出し系 API の例外をホスト JS が変換する) |
+| batchDone | JS → Kotlin | `{type: "batchDone", row_begin, row_end, block_size, width}` の直後に該当範囲の合成済み RGBA(ArrayBuffer) |
+| result | JS → Kotlin | `{type: "result", width, height}` の直後に完成画像 RGBA(ArrayBuffer) |
+| stepDone | JS → Kotlin | `{type: "stepDone"}`(1 バッチ完了。Kotlin は `step` を返して次バッチを駆動する) |
+| error / canceled | JS → Kotlin | `{type: "error", message}` / `{type: "canceled"}` |
 
+- Kotlin → JS の RGBA は named data(`provideNamedData`)で渡し、メッセージには `dataRef` のみを含める。JS → Kotlin には named data の consume API が無いため、ArrayBuffer を MessagePort で送る。
 - 正確な API 名・サイズ上限は androidx.javascriptengine の公式ドキュメントを正とし、A0 で実機確認の上、本書と詳細設計書へ反映する。
-- S2 の操作(ブロックサイズスライダー・タイル追加/削除の差分再マッチ・設定変更)を UI 仕様どおりに成立させるため、control 種別は凍結論理 API と同一の一式を用意する。進捗・部分結果の通知はバッチ駆動(`begin_run` / `step_run`)をホスト JS 内のループで担い、`step_run` の戻り値(progress / result)を MessagePort メッセージへ変換する。
+- S2 の操作(ブロックサイズスライダー・タイル追加/削除の差分再マッチ・設定変更)を UI 仕様どおりに成立させるため、control 種別は凍結論理 API と同一の一式を用意する。進捗・部分結果の通知はバッチ駆動(`begin_run` / `step_run`)をホスト JS 内で担い、`step_run` の戻り値(progress / result)を MessagePort メッセージへ変換する。サンドボックスに `setTimeout` が無いため、バッチ境界は `stepDone` → `step` の往復で作る。
 
 ## 4. プロジェクトセットアップ(A0)
 
@@ -155,6 +158,16 @@ progress.collectAsState().value.let { event ->
 
 検収: S-mid 相当データで Web と同等の時間で生成が完了し、進捗バー・段階的置き換えが動く。
 
+### 6.1 A2 実施結果
+
+- プロトコル(`core/CoreModels.kt` / `core/JsCoreEngine.kt`): 制御は MessagePort の文字列 JSON、Kotlin → JS の RGBA は named data(`dataRef` のみを送る)、JS → Kotlin の部分結果・完成画像は JSON の直後に ArrayBuffer を送る方式で実装した。要求と応答は `id` で対応付け、60 秒でタイムアウトする。
+- バッチ駆動(`assets/host/host.js`): サンドボックスに `setTimeout` が無いため、`begin_run` / `begin_rematch` 後の 1 バッチごとに `stepDone` を送り、Kotlin が `step` を返すハンドシェイクでバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。進捗は `progress`、部分結果は `batchDone` + ArrayBuffer、完成は `result` + ArrayBuffer として送る。
+- 部分描画: `batchDone` の行範囲をグリッド全体の Bitmap へ `Canvas.drawBitmap` で転写し、`previewRevision` で Compose の再描画を促す。完成時は完成 RGBA を Bitmap 化して保存・共有に使う。
+- S2 UI(`ui/editor/EditorScreen.kt` / `EditorViewModel.kt`): プレビュー(タップでメイン画像変更)、ブロックサイズ(8〜128px、300ms デバウンス)、メイン画像ブレンド(0〜0.8)、色補正(0〜1.0)、重複閾値(0.5〜8.0)、進捗バー(割当/全体・フェーズ・開閉)、キャンセル、構成画像の追加/削除(編集中は差分再マッチ)、保存/共有、戻る(全状態クリア)を実装した。保存は完成時のみ有効。API 26〜28 では保存前に `WRITE_EXTERNAL_STORAGE` を要求する。
+- コア共有(`MainActivity.kt` / `StartupViewModel.kt`): 起動検査と編集画面で同一の `JsCoreEngine` を Activity スコープの `StartupViewModel` 経由で共有し、画面遷移でサンドボックスを作り直さない。
+- 検証: `compileDebugKotlin` / `compileDebugAndroidTestKotlin` / `detekt` / `ktlint` / `lintDebug` / ユニットテスト 13 件が成功。実機テストは 15 件中 14 件成功・1 件スキップ。スキップした `JsCoreEngineTest` は、検証用エミュレータの WebView 133/134 が `JS_FEATURE_MESSAGE_PORTS` を公開しないため `Assume` でスキップした(AndroidX JavaScriptEngine の `createMessageChannel` も "Sandbox does not support MessagePorts" を返す)。ホスト JS のプロトコルは Node.js 上で、モックに加えて実際の `photomosaic_core_wasm.js` / `.wasm` を使って検証した(named data 消費、`stepDone` → `step`、progress/batchDone/result の JSON + ArrayBuffer、キャンセル、完成 RGBA のサイズまで確認)。MessagePort 対応 WebView を搭載した実機での生成確認は未実施。
+- 既知の制約: MessagePort 非対応端末では起動検査が `Failed("MessagePort is not supported")` となり、A0 の失敗案内に原因メッセージを表示する。
+
 ## 7. 品質確認(A3)
 
 | 項目 | 確認方法 |
@@ -190,7 +203,7 @@ Android 実装で典型的に浮上する課題と、その扱い:
 
 - [x] A0: セットアップ、javascriptengine 追加、isSupported / WASM 検査、`getVersion()` 表示
 - [x] A1: Photo Picker・Kotlin デコード・保存・共有
-- [ ] A2: MessagePort 連携(進捗・部分描画・キャンセル)、UI を Web 仕様どおりに実装
+- [x] A2: MessagePort 連携(進捗・部分描画・キャンセル)、UI を Web 仕様どおりに実装(実機の生成確認は MessagePort 対応 WebView で未実施)
 - [ ] A3: 品質確認(オフライン・決定性・性能・転送・メモリ・回転・プロセス死)
 - [ ] A4: フィードバックの運用開始(課題の仕分けルールをチームで共有)
 
