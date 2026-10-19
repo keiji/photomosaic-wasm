@@ -53,6 +53,7 @@
     <string name="editor_phase_done">合成終了</string>
     <string name="editor_metrics_title">メトリクス</string>
     <string name="editor_metrics_copy">メトリクスをコピー</string>
+    <string name="editor_metrics_copied">コピーしました</string>
     <string name="editor_metrics_dismiss">メトリクスを閉じる</string>
     <string name="editor_metrics_empty">メトリクスはありません</string>
     <string name="editor_cancel">キャンセル</string>

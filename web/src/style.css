@@ -366,6 +366,14 @@ body {
   }
 }
 
+.metrics-copy-status {
+  flex: none;
+  align-self: center;
+  color: #9be59b;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .metrics-copy {
   display: inline-flex;
   align-items: center;

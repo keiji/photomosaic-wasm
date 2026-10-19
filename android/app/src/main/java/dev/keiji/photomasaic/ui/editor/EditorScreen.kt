@@ -40,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -64,6 +65,7 @@ import dev.keiji.photomasaic.io.MIN_BLOCK_SIZE
 import java.text.NumberFormat
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 /** ViewModel と画面を結線するルート(A1/A2)。 */
 @Composable
@@ -539,7 +541,15 @@ private fun MetricsPanel(
 ) {
     val context = LocalContext.current
     val copyLabel = stringResource(R.string.editor_metrics_copy)
+    val copiedLabel = stringResource(R.string.editor_metrics_copied)
     val dismissLabel = stringResource(R.string.editor_metrics_dismiss)
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(METRICS_COPIED_VISIBLE_MS)
+            copied = false
+        }
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -558,11 +568,19 @@ private fun MetricsPanel(
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
             )
+            if (copied) {
+                Text(
+                    text = copiedLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
         IconButton(
             onClick = {
                 val clipboard = context.getSystemService(ClipboardManager::class.java)
                 clipboard?.setPrimaryClip(ClipData.newPlainText("metrics", metrics.rawJson))
+                copied = true
             },
         ) {
             Icon(
@@ -689,3 +707,4 @@ private const val MAX_MAIN_BLEND = 0.8f
 private const val MIN_DUPLICATE_DE = 0.5f
 private const val MAX_DUPLICATE_DE = 8.0f
 private const val PERCENT = 100f
+private const val METRICS_COPIED_VISIBLE_MS = 2_000L

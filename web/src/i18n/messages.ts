@@ -77,6 +77,7 @@ export const messages = {
 
   // メトリクス表示
   metricsCopyLabel: 'メトリクスをコピー',
+  metricsCopied: 'コピーしました',
   metricsCloseLabel: 'メトリクスを閉じる',
 
   // エラー(インライン表示)

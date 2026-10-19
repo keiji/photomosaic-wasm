@@ -205,6 +205,9 @@ class EditorScreenTest {
         val clipboard = composeTestRule.activity.getSystemService(ClipboardManager::class.java)
         org.junit.Assert.assertEquals(rawMetrics, clipboard.primaryClip?.getItemAt(0)?.text)
         composeTestRule
+            .onNodeWithText(composeTestRule.activity.getString(R.string.editor_metrics_copied))
+            .assertExists()
+        composeTestRule
             .onNodeWithContentDescription(composeTestRule.activity.getString(R.string.editor_metrics_dismiss))
             .assertExists()
     }

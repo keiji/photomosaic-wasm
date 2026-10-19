@@ -21,6 +21,8 @@ export class MetricsOverlay {
   private readonly element: HTMLElement | null = null;
   private readonly textElement: HTMLElement | null = null;
   private readonly copyButton: HTMLButtonElement | null = null;
+  private readonly copyStatusElement: HTMLElement | null = null;
+  private copyResetTimer: number | undefined;
   private lastLine = '';
   private clipboardText = '';
 
@@ -47,6 +49,12 @@ export class MetricsOverlay {
     const text = document.createElement('span');
     text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;';
 
+    const copyStatus = document.createElement('span');
+    copyStatus.className = 'metrics-copy-status';
+    copyStatus.setAttribute('role', 'status');
+    copyStatus.setAttribute('aria-live', 'polite');
+    copyStatus.hidden = true;
+
     const copyButton = document.createElement('button');
     copyButton.type = 'button';
     copyButton.className = 'metrics-copy';
@@ -72,13 +80,14 @@ export class MetricsOverlay {
       this.dismiss();
     });
 
-    row.append(text, copyButton, closeButton);
+    row.append(text, copyStatus, copyButton, closeButton);
     element.append(row);
     element.hidden = true;
     document.body.append(element);
     this.element = element;
     this.textElement = text;
     this.copyButton = copyButton;
+    this.copyStatusElement = copyStatus;
   }
 
   /** run の計測結果を更新する(直近 run の 1 行サマリ)。データが無ければ隠す */
@@ -111,6 +120,7 @@ export class MetricsOverlay {
 
   /** リセット時のクリア */
   clear(): void {
+    this.resetCopyStatus();
     this.lastLine = '';
     this.clipboardText = '';
     if (this.copyButton) {
@@ -123,6 +133,7 @@ export class MetricsOverlay {
 
   /** × ボタンで閉じる。次回の update で新しい計測結果を表示する */
   private dismiss(): void {
+    this.resetCopyStatus();
     if (this.element) {
       this.element.hidden = true;
     }
@@ -134,8 +145,37 @@ export class MetricsOverlay {
     }
     try {
       await copyText(this.clipboardText);
+      this.showCopied();
     } catch (err) {
       console.warn('metrics copy failed', err);
+    }
+  }
+
+  /** コピー成功を一時的に表示する */
+  private showCopied(): void {
+    this.resetCopyStatus();
+    const status = this.copyStatusElement;
+    if (!status) {
+      return;
+    }
+    status.textContent = messages.metricsCopied;
+    status.hidden = false;
+    this.copyResetTimer = window.setTimeout(() => {
+      this.copyResetTimer = undefined;
+      status.hidden = true;
+      status.textContent = '';
+    }, 2000);
+  }
+
+  /** コピー表示を即時クリアする */
+  private resetCopyStatus(): void {
+    if (this.copyResetTimer !== undefined) {
+      window.clearTimeout(this.copyResetTimer);
+      this.copyResetTimer = undefined;
+    }
+    if (this.copyStatusElement) {
+      this.copyStatusElement.hidden = true;
+      this.copyStatusElement.textContent = '';
     }
   }
 }

@@ -417,7 +417,7 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 
 ## 10. 性能目標と計測
 
-フェーズごとの所要時間はコア内部で常時計測され `getMetrics()` で取得できる。Android では Kotlin の `CoreEngine.getMetrics()` と host.js の `getMetrics` control を経由してメトリクス JSON を取得する。Web は生成完了後に直近 run のサマリをオーバーレイ表示し、Android も合成終了後にサマリを表示する。どちらも表示の右側にコピーアイコンを置き、メトリクス JSON をクリップボードへコピーできる。表示は × ボタンで閉じるまで維持し、次の計測更新で再表示する。
+フェーズごとの所要時間はコア内部で常時計測され `getMetrics()` で取得できる。Android では Kotlin の `CoreEngine.getMetrics()` と host.js の `getMetrics` control を経由してメトリクス JSON を取得する。Web は生成完了後に直近 run のサマリをオーバーレイ表示し、Android も合成終了後にサマリを表示する。どちらも表示の右側にコピーアイコンを置き、メトリクス JSON をクリップボードへコピーでき、成功時は「コピーしました」を表示する。表示は × ボタンで閉じるまで維持し、次の計測更新で再表示する。
 目標値・計測方法の詳細は [性能計測設計](./handoff/05_performance_measurement.md) を参照。
 
 参考目標(ミッドレンジデスクトップ、メイン 12MP / タイル 300 枚 / ブロック 24px):
