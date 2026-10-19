@@ -1,0 +1,10 @@
+# Detekt 設定(A0)。既定ルールを土台に、Compose と色定数の慣習だけ調整する。
+naming:
+  FunctionNaming:
+    # @Composable 関数は PascalCase が慣習のため除外する
+    ignoreAnnotated:
+      - Composable
+style:
+  MagicNumber:
+    # テーマの色定数はプロパティ宣言で表すため対象外にする
+    ignorePropertyDeclaration: true

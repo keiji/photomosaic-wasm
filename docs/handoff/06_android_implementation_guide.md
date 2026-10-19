@@ -97,6 +97,16 @@ control メッセージの種別は、詳細設計書 2 章で凍結した論理
 
 検収: `isSupported()` と `typeof WebAssembly` の確認 → コアの `getVersion()` を Compose 画面に表示。機内モードで動作する。
 
+### 4.1 A0 実施結果(2026-10-19)
+
+- 構成: Gradle 9.1.0 / AGP 9.0.1 / Kotlin 2.3.20 / Compose BOM 2026.03.01 / androidx.javascriptengine 1.1.1 / Detekt 1.23.8。`minSdk` は 26。
+- Detekt 1.23.8 は JDK 25 では起動できないため、Gradle は JDK 21 で実行する(CI も Temurin 21)。`jvmToolchain(21)` を設定済み。
+- 確認した API: `JavaScriptSandbox.isSupported()` は引数なし。`JS_FEATURE_WASM_COMPILATION` / `JS_FEATURE_PROMISE_RETURN` / `JS_FEATURE_PROVIDE_CONSUME_ARRAY_BUFFER` / `JS_FEATURE_CONSOLE_MESSAGING` / `JS_FEATURE_MESSAGE_PORTS` は実在。`JavaScriptConsoleCallback` で console 出力を logcat へ転送する。
+- グルーは `wasm-pack --target no-modules` で生成し、`buildCoreGlue` → `SyncCoreAssets` で `assets/core/` へ取り込む。AGP 9 では SourceSet に Provider を渡せないため、Variant API の `addGeneratedSourceDirectory` を使う。
+- 実行経路: Kotlin が `host/host.js` → グルー → `__pmInit(wasmRef)` の順に評価。`.wasm` は `provideNamedData` で渡し、ホスト JS が `android.consumeNamedDataAsArrayBuffer` → `WebAssembly.compile` → `wasm_bindgen.initSync({ module })` → `get_version()` を呼ぶ。
+- isolate には `TextDecoder` / `TextEncoder` が無いため、`host.js` で最小限の UTF-8 ポリフィルを定義してからグルーを評価する(初回実行で `TextDecoder is not defined` を確認し対処)。
+- 検証結果: `:app:assembleDebug` / `:app:detekt` / `:app:testDebugUnitTest`(5 件)/ `:app:lintDebug` が成功。android-36 (google_apis_playstore, x86_64) エミュレータで「JavaScript エンジン: 対応」「WebAssembly: 利用可能」「コアバージョン: photomosaic-core 0.1.0」を表示。`aapt dump permissions` で `INTERNET` が無いことを確認。
+
 ## 5. 画像入出力(A1)
 
 ### 5.1 メディアピッカー
@@ -170,7 +180,7 @@ Android 実装で典型的に浮上する課題と、その扱い:
 
 ## 9. タスク一覧(チェックリスト)
 
-- [ ] A0: セットアップ、javascriptengine 追加、isSupported / WASM 検査、`getVersion()` 表示
+- [x] A0: セットアップ、javascriptengine 追加、isSupported / WASM 検査、`getVersion()` 表示
 - [ ] A1: Photo Picker・Kotlin デコード・保存・共有
 - [ ] A2: MessagePort 連携(進捗・部分描画・キャンセル)、UI を Web 仕様どおりに実装
 - [ ] A3: 品質確認(オフライン・決定性・性能・転送・メモリ・回転・プロセス死)

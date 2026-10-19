@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">フォトモザイク メーカー</string>
+    <string name="privacy_notice">※ 画像はこの端末内でだけ処理されます</string>
+    <string name="startup_checking">起動チェック中…</string>
+    <string name="startup_sandbox_ok">JavaScript エンジン: 対応</string>
+    <string name="startup_wasm_ok">WebAssembly: 利用可能</string>
+    <string name="startup_core_version">コアバージョン: %1$s</string>
+    <string name="startup_sandbox_unsupported">この端末では JavaScript エンジン(サンドボックス)が利用できません。対応端末でのみ動作します。</string>
+    <string name="startup_wasm_unavailable">この端末では WebAssembly を利用できません。</string>
+    <string name="startup_failed">コアの起動に失敗しました。</string>
+    <string name="retry">再試行</string>
+</resources>

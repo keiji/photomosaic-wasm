@@ -1,0 +1,5 @@
+root = true
+
+[*.{kt,kts}]
+# Compose の関数は PascalCase が慣習のため、関数命名規則の対象外にする
+ktlint_function_naming_ignore_when_annotated_with = Composable
