@@ -152,6 +152,9 @@ dependencies {
     // AndroidX JavaScript Engine(サンドボックス上で Web と同一の WASM を実行)
     implementation(libs.androidx.javascriptengine)
 
+    // EXIF 回転の反映(API 26〜27 の BitmapFactory 経路で使用)
+    implementation(libs.androidx.exifinterface)
+
     // Local tests
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
@@ -163,4 +166,5 @@ dependencies {
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.espresso.core)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
 }

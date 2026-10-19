@@ -126,6 +126,14 @@ control メッセージの種別は、詳細設計書 2 章で凍結した論理
 - 保存: コアから RGBA を受領 → Bitmap 化 → `Bitmap.compress`(PNG)→ MediaStore の `Pictures/Photomosaic`(`RELATIVE_PATH`)へ書き込み。権限不要(スコープドストレージ)。
 - 共有: FileProvider で一時公開 URI を作り `ACTION_SEND`(image/png)を発行。保存直後に共有シートを出すオプションを用意。
 
+### 5.4 A1 実施結果(2026-10-19)
+
+- 画像 I/O(`io/ImageLoader.kt`): API 28 以降は `ImageDecoder`(EXIF 回転を自動反映、`setTargetSize` で同時縮小)、API 26〜27 は `BitmapFactory` + `androidx.exifinterface` で回転を反映してから縮小する。アルファ付き画像は白背景へ合成して不透明化する。
+- 正規化: メイン画像は長辺 4096px 以下(超過時は等比縮小)、タイルは合成用 64px 以下・特徴量用 32×32(面積平均のボックスフィルタ)を生成する。`normalizeSize` / `composeThumbSize` / `boxResize` は Android 非依存の純関数として単体テスト済み。
+- S1 開始画面(`ui/editor/`): `PickVisualMedia` でメイン画像 1 枚、`PickMultipleVisualMedia` で構成画像を複数選択。プレビュー・正規化後サイズ・縮小案内・枚数・読み込み進捗・個別削除・20 枚までの初期表示(「すべて表示」で全件)を実装。エラー時は再選択を案内する。
+- 保存・共有(`io/ImageExporter.kt`): API 29 以降は MediaStore の `Pictures/Photomosaic` へ PNG を保存(権限不要)。API 26〜28 は公開 Pictures へ保存するため `WRITE_EXTERNAL_STORAGE`(maxSdkVersion=28)を宣言し、実行時に権限が必要。共有はキャッシュ配下へ PNG を書き出し、FileProvider の content URI を `ACTION_SEND` へ渡す。保存・共有ボタンの UI 結線は、完成画像を生成する A2 で行う。
+- 検証: ユニットテスト 13 件、実機テスト 12 件(デコード・EXIF・サムネイル・MediaStore 保存・FileProvider 共有・ViewModel・画面表示)が合格。`assembleDebug` / `detekt` / `lintDebug` も成功。エミュレータで 800×600 のメイン画像とタイル 2 枚を Photo Picker から選択し、プレビュー・「構成画像: 2 枚」・削除後の「1 枚」を確認した。
+
 ## 6. コア連携と進捗(A2)
 
 ```kotlin
@@ -181,7 +189,7 @@ Android 実装で典型的に浮上する課題と、その扱い:
 ## 9. タスク一覧(チェックリスト)
 
 - [x] A0: セットアップ、javascriptengine 追加、isSupported / WASM 検査、`getVersion()` 表示
-- [ ] A1: Photo Picker・Kotlin デコード・保存・共有
+- [x] A1: Photo Picker・Kotlin デコード・保存・共有
 - [ ] A2: MessagePort 連携(進捗・部分描画・キャンセル)、UI を Web 仕様どおりに実装
 - [ ] A3: 品質確認(オフライン・決定性・性能・転送・メモリ・回転・プロセス死)
 - [ ] A4: フィードバックの運用開始(課題の仕分けルールをチームで共有)

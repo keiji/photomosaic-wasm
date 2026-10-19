@@ -10,6 +10,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -23,13 +24,17 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.keiji.photomasaic.R
 import dev.keiji.photomasaic.theme.PhotomosaicTheme
 
-/** ViewModel と画面を結線するルート(A0)。 */
+/** ViewModel と画面を結線するルート(A0)。起動成功時は onReady で次画面へ遷移する。 */
 @Composable
 fun StartupRoute(
     modifier: Modifier = Modifier,
+    onReady: (String) -> Unit = {},
     viewModel: StartupViewModel = viewModel(factory = StartupViewModel.factory(LocalContext.current)),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    LaunchedEffect(state) {
+        (state as? StartupUiState.Ready)?.let { onReady(it.coreVersion) }
+    }
     StartupScreen(state = state, onRetry = viewModel::check, modifier = modifier)
 }
 

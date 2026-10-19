@@ -9,4 +9,21 @@
     <string name="startup_wasm_unavailable">この端末では WebAssembly を利用できません。</string>
     <string name="startup_failed">コアの起動に失敗しました。</string>
     <string name="retry">再試行</string>
+    <string name="editor_offline">オフライン</string>
+    <string name="editor_main_image_title">① メイン画像</string>
+    <string name="editor_main_image_empty">メイン画像を選択してください</string>
+    <string name="editor_main_image_select">メイン画像を選択</string>
+    <string name="editor_main_image_change">変更</string>
+    <string name="editor_image_size">%1$d × %2$d</string>
+    <string name="editor_image_scaled">長辺 %1$d px に縮小しました</string>
+    <string name="editor_tiles_title">② 構成画像(タイル)</string>
+    <string name="editor_tiles_empty">構成画像を追加してください</string>
+    <string name="editor_tiles_add">構成画像を追加</string>
+    <string name="editor_tiles_count">構成画像: %1$d 枚</string>
+    <string name="editor_tiles_loading">読み込み中 %1$d / %2$d 枚</string>
+    <string name="editor_tiles_show_all">すべての画像を表示(%1$d 枚)</string>
+    <string name="editor_tile_remove">削除</string>
+    <string name="editor_decode_failed">画像を読み込めませんでした。別の画像を選択してください。</string>
+    <string name="editor_core_version">コア: %1$s</string>
+    <string name="share_chooser_title">完成画像を共有</string>
 </resources>
