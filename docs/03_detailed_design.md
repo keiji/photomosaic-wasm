@@ -74,20 +74,25 @@ photomosaic-wasm/
 |---|---|---|---|
 | `setMainImage(rgba, w, h)` | RGBA ピクセル・寸法 | `GridInfo` | メイン画像を設定しグリッド・ブロック特徴量を計算。全体ブロック数を返す |
 | `setBlockSize(px)` | px | `GridInfo` | ブロックサイズ変更(グリッド再計算・全ブロック再マッチ要求) |
-| `addTile(id, rgba, w, h)` | タイル 1 枚 | `TileInfo` | タイル解析(サムネイル化・特徴量算出)をしてプールへ登録 |
-| `removeTile(id)` | タイル ID | `void` | プールから削除。割当中ブロックは再マッチ対象 |
-| `run()` | - | `void` | マッチング+合成を開始(非同期。進捗はコールバック) |
-| `cancel()` | - | `void` | 実行中処理をキャンセル |
+| `addTile(id, featureThumb, composeThumb, w, h)` | タイル 1 枚分の 2 種サムネイル | `TileInfo` | 特徴量用サムネイル(32×32・ボックスフィルタ縮小済み)と合成用サムネイル(長辺 64 上限)をホストが生成して渡す。コアは特徴量算出・プール登録を行う |
+| `removeTile(id)` | タイル ID | `void` | プールから削除。割当中ブロックは未確定へ戻す(次の差分再マッチ対象) |
+| `beginRun() / stepRun(nowMs)` | 開始・1 バッチ進行 | `void` / `StepOutput` | 生成(P3+P4)を行バッチ単位で駆動する主経路(M5)。`stepRun` はバッチごとに進捗イベント・部分結果・完了フラグを返し、ホストはバッチ境界で JS/サンドボックスへ制御を返す(8.1) |
+| `run()` | - | `void` | 同期で完走する一括実行(内部で `beginRun` + `stepRun` を完走させる便利経路。検証・ベンチ・サンドボックス内の駆動に使用) |
+| `rematch()` | - | `void` | 差分再マッチ(M6)。未確定ブロックのマッチ・差し替え評価(4.4)を行い、再マッチした行のみ再合成する |
+| `cancel()` | - | `void` | 実行中処理をバッチ境界でキャンセル(現時点までの合成結果と確定済み割当は保持。7.5) |
 | `onProgress(cb)` | コールバック | `void` | 進捗イベント受け取り登録 |
 | `onResult(cb)` | コールバック | `void` | 行バッチ単位の部分結果(RGBA + 位置)受け取り登録 |
+| `getBlockMeanColors()` | - | RGB 3 バイト×ブロック数 | ブロック平均色(グリッドプレビュー描画用。メイン画像未設定時は空) |
+| `getTileCount() / getTilesMemoryBytes()` | - | u32 | タイルプールの枚数・合成用サムネイル合計バイト数(メモリガード監視値) |
+| `clearTiles() / clearMainImage()` | - | `void` | プール・メイン画像状態の破棄(リセット操作。大容量バッファを開放) |
 | `exportImage()` | - | RGBA バッファ | 完成画像(または現時点までの合成結果)を取得 |
-| `getConfig() / setConfig(json)` | 設定 JSON | 設定 JSON | 閾値パラメータの参照・上書き |
+| `getConfig() / setConfig(json)` | 設定 JSON | 設定 JSON | 閾値パラメータの参照・上書き(全フィールド必須。5 章の範囲外はエラー) |
 | `getMetrics()` | - | JSON | 性能計測結果(詳細は[性能計測設計](./handoff/05_performance_measurement.md)) |
 | `getVersion()` | - | string | コアのバージョン文字列。UI がコアと UI の不整合を検知するために表示する |
-| `onError(cb)` | コールバック | `void` | エラーイベント受け取り登録(メモリ不足・不正入力・内部エラー)。Web はコールバック、Android は error メッセージ(MessagePort)へ変換する |
 
 注意:
-- `run()` は呼び出し元スレッドを長時間ブロックしない。どのホストでも処理をバッチ単位に区切って JS の制御に返す(後述 8 章)。Android では JavaScript エンジン サンドボックス(別プロセス)上でバッチが進行し、アプリの UI スレッドは塞がない。
+- `run()` は呼び出し元スレッドを長時間ブロックしない。どのホストでも処理をバッチ単位に区切って JS の制御に返す(後述 8 章)。Android では JavaScript エンジン サンドボックス(別プロセス)上でバッチが進行し、アプリの UI スレッドは塞がない。進捗・部分結果の通知が必要な経路では `beginRun()` / `stepRun()` を使用し、同期の `run()` は検証・一括実行の便利経路として使い分ける。
+- **エラーの伝播**: コールバック登録(onError)は廃止し、エラーは各呼び出しの**例外**として返す(不正入力・範囲外設定・メモリガード超過・メイン画像未設定など。Web は JS `Error`、WASM バインディングは `Result::Err(JsValue)` を介して Error に変換)。バッチ駆動中のエラーも `step_run` の例外としてホストが受け取り、Android ホストはこれを MessagePort の `error` メッセージへ変換する(handoff/06 §3.3)。
 - 画像バッファの受け渡しは RGBA(1 ピクセル 4 バイト)に統一する。色順変換・リサイズ済みのデータを受け取る。
 - ピクセルバッファの正規形: バイト順は R→G→B→A、格納は行優先(上→下、左→右)、非プリマルチプライ、色空間は sRGB として扱う。
 - プラットフォーム間のデコード・縮小の差(実装・色空間・リサンプラ)は入力ピクセルの差として現れることを許容する。プラットフォーム間の出力一致は保証しない(決定性は同一ホスト内での検証による。11 章参照)。
@@ -123,18 +128,17 @@ MatchResult {
 }
 
 ProgressEvent {
-  phase: Phase                 // 7章参照
-  phase_ratio: f32             // 0.0..1.0
-  overall_ratio: f32           // 0.0..1.0 (全フェーズ通し)
-  assigned_blocks: u32         // マッチ済みブロック数(match中のみ有効)
+  phase_code: string          // フェーズの安定識別子(例: "main_analyze"。7.1 の対応表)
+  phase_ratio: f32            // 0.0..1.0
+  overall_ratio: f32          // 0.0..1.0 (全フェーズ通し)
+  assigned_blocks: u32        // マッチ済みブロック数(match中のみ有効)
   total_blocks: u32
-  code: string?                // 任意の短い識別子(文言は持たない。例: "tile_analyzing")
-  params: [string|number]?     // code に付随する数値等(例: 解析済みタイル数)
 }
 
 ResultBatch {
   block_row_begin: u32, block_row_end: u32   // 完成した行範囲
-  rgba: buffer                               // その範囲の合成済みピクセル
+  block_size: u32, width: u32                // 画素行への写像(row_begin * block_size)に使用
+  rgba: buffer                               // width * (end - begin) * block_size * 4 バイトの合成済み RGBA
 }
 ```
 
@@ -357,7 +361,7 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 
 - 発火間隔は **16ms 以上** または **overall_ratio が 1% 以上変化** したとき。UI 更新負荷を抑えつつ追従性を確保する。
 - `assigned_blocks / total_blocks` は P3 中は毎バッチ更新される(UI の横方向進捗バーの入力)。
-- 付帯情報は `code` + `params`(例: `"tile_analyzing"`, `{count: 132}`)。コアは文言を持たず、文言化は UI 側のリソースで行う(基本設計 5 章の国際化方針と整合)。
+- 付帯情報の通知は `phase_code` のみ(M5 で確定。当初検討した `params` 付きの付帯情報は、進捗の数値そのものが `assigned_blocks / total_blocks` として通知されるため廃止)。コアは文言を持たず、`phase_code` → 文言の変換は UI 側のリソースで行う(基本設計 5 章の国際化方針と整合)。
 
 ### 7.3 プラットフォームごとのコールバック実装
 

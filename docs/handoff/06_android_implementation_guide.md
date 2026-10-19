@@ -56,10 +56,10 @@
 Kotlin
   │ ①Photo Picker → Uri → デコード(EXIF 反映)→ 正規化縮小 → RGBA
   │ ②named data 提供 API(バイト配列)で RGBA をサンドボックスへ提供
-  │ ③MessagePort で制御メッセージ(JSON)を送信: setMainImage / addTile / run / cancel
+  │ ③MessagePort で制御メッセージ(JSON)を送信: setMainImage / setBlockSize / addTile / run / rematch / cancel(§3.3 の一式)
   ▼
 ホスト JS(サンドボックス内)
-  │ ④コア: setMainImage / addTile / run(バッチ処理 + 進捗)
+  │ ④コア: setMainImage / addTile / begin_run + step_run(バッチ処理 + 進捗)
   │ ⑤進捗・部分結果を MessagePort へ postMessage(JSON)
   ▼
 Kotlin(受信コールバック → callbackFlow → StateFlow → Compose)
@@ -72,15 +72,18 @@ Kotlin(受信コールバック → callbackFlow → StateFlow → Compose)
 
 ### 3.3 メッセージプロトコル(概要)
 
+control メッセージの種別は、詳細設計書 2 章で凍結した論理 API(M4+M5〜M8 追加分)の一式に対応させる:
+
 | 種別 | 方向 | ペイロード(JSON) |
 |---|---|---|
-| control | Kotlin → JS | `{type: "setMainImage" \| "addTile" \| "removeTile" \| "run" \| "cancel", dataRef: "...", meta: {...}}` |
-| progress | JS → Kotlin | `{type: "progress", phase, phaseRatio, overallRatio, assignedBlocks, totalBlocks, code, params}` |
-| batchDone | JS → Kotlin | `{type: "batchDone", rows: [begin, end], dataRef: "..."}`(該当範囲の合成済み RGBA) |
+| control | Kotlin → JS | `{type: "setMainImage" \| "setBlockSize" \| "addTile" \| "removeTile" \| "clearTiles" \| "run" \| "rematch" \| "cancel" \| "getConfig" \| "setConfig" \| "exportImage" \| "getVersion", dataRef: "...", meta: {...}}` |
+| progress | JS → Kotlin | `{type: "progress", phase_code, phase_ratio, overall_ratio, assigned_blocks, total_blocks}`(コアの ProgressEvent のフィールド名に一致。文言化は Kotlin 側リソースで行う) |
+| batchDone | JS → Kotlin | `{type: "batchDone", rows: [begin, end], dataSize, dataRef: "..."}`(該当範囲の合成済み RGBA) |
 | result | JS → Kotlin | `{type: "result", dataRef: "..."}`(完成画像 RGBA) |
-| error | JS → Kotlin | `{type: "error", code, message}` |
+| error | JS → Kotlin | `{type: "error", code, message}`(コア呼び出し系 API の例外をホスト JS が変換する) |
 
 - 正確な API 名・サイズ上限は androidx.javascriptengine の公式ドキュメントを正とし、A0 で実機確認の上、本書と詳細設計書へ反映する。
+- S2 の操作(ブロックサイズスライダー・タイル追加/削除の差分再マッチ・設定変更)を UI 仕様どおりに成立させるため、control 種別は凍結論理 API と同一の一式を用意する。進捗・部分結果の通知はバッチ駆動(`begin_run` / `step_run`)をホスト JS 内のループで担い、`step_run` の戻り値(progress / result)を MessagePort メッセージへ変換する。
 
 ## 4. プロジェクトセットアップ(A0)
 
