@@ -411,10 +411,11 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 | タイル特徴 | 32×32 Lab ≈ 1 KB/枚 | 数万枚に耐える |
 | タイル合成サムネイル | 64×64 RGBA ≈ 16 KB/枚 × memory_guard(3,000 枚で約 48 MB) | 上限超過で解像度半減 |
 | WASM ヒープ | 初期 256 MB 相当 | 伸長は wasm-bindgen 既定に任せ、失敗時はエラーとして UI へ通知。Android ではサンドボックス(isolate)のメモリ上限(端末依存)があるため、実機での上限確認を品質確認に含める |
+| Android evaluate フォールバックの受信バッファ | 完成 RGBA と同サイズ | 応答の `length` を先に受け取り、チャンク到着時に最終サイズの `ByteArray` を一度だけ確保する。`ByteArrayOutputStream` の伸長と `toByteArray()` の複製による Java ヒープの倍化を避ける |
 
 ## 10. 性能目標と計測
 
-フェーズごとの所要時間はコア内部で常時計測され `getMetrics()` で取得できる。
+フェーズごとの所要時間はコア内部で常時計測され `getMetrics()` で取得できる。Android では Kotlin の `CoreEngine.getMetrics()` と host.js の `getMetrics` control を経由してメトリクス JSON を取得する。
 目標値・計測方法の詳細は [性能計測設計](./handoff/05_performance_measurement.md) を参照。
 
 参考目標(ミッドレンジデスクトップ、メイン 12MP / タイル 300 枚 / ブロック 24px):

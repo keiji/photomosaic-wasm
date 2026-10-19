@@ -79,9 +79,9 @@ control メッセージの種別は、詳細設計書 2 章で凍結した論理
 
 | 種別 | 方向 | ペイロード(JSON) |
 |---|---|---|
-| control | Kotlin → JS | `{type: "setMainImage" \| "setBlockSize" \| "getBlockMeanColors" \| "addTile" \| "removeTile" \| "clearTiles" \| "clearMainImage" \| "getConfig" \| "setConfig" \| "run" \| "rematch" \| "step" \| "cancel", id, dataRef?, meta?, config?}` |
+| control | Kotlin → JS | `{type: "setMainImage" \| "setBlockSize" \| "getBlockMeanColors" \| "addTile" \| "removeTile" \| "clearTiles" \| "clearMainImage" \| "getMetrics" \| "getConfig" \| "setConfig" \| "run" \| "rematch" \| "step" \| "cancel", id, dataRef?, meta?, config?}` |
 | inputBegin / inputChunk | Kotlin → JS | MessagePort のバイナリ入力、または Base64 evaluate 経路。`{type: "inputBegin", id: "main-1", length}` の後に、MessagePort では ArrayBuffer、Base64 evaluate では `{type: "inputChunk", id: "main-1", data: "<base64>"}` を送る。Base64 チャンクは 512 KiB 以下 |
-| response | JS → Kotlin | `{type: "response", id, ok, grid?, tile?, config?, binary?, length?, error?}`(binary 応答は JSON の直後に ArrayBuffer、または Base64 チャンク) |
+| response | JS → Kotlin | `{type: "response", id, ok, grid?, tile?, config?, metrics?, binary?, length?, error?}`(binary 応答は JSON の直後に ArrayBuffer、または Base64 チャンク) |
 | progress | JS → Kotlin | `{type: "progress", phase_code, phase_ratio, overall_ratio, assigned_blocks, total_blocks}`(コアの ProgressEvent のフィールド名に一致。文言化は Kotlin 側リソースで行う) |
 | batchDone | JS → Kotlin | `{type: "batchDone", row_begin, row_end, block_size, width, length}` の直後に該当範囲の合成済み RGBA(ArrayBuffer または Base64 チャンク) |
 | result | JS → Kotlin | `{type: "result", width, height, length}` の直後に完成画像 RGBA(ArrayBuffer または Base64 チャンク) |
@@ -202,6 +202,30 @@ progress.collectAsState().value.let { event ->
 | レイアウト | 縦持ち・横持ち・回転途中でも処理が破綻しない(ViewModel で状態保持) |
 | プロセス死 | 生成中にバックグラウンド遷移→プロセス再起動してもクラッシュしない(状態は復元しなくてよい、エラー表示で救済) |
 
+### 7.1 A3 実施結果(2026-10-19)
+
+- 検証環境: android-36 エミュレータ(`medium_phone`)、WebView 133、トランスポートは `named_data_evaluate`。Android 実機の絶対目標値は設定せず、同一端末での前回比による変化検知を前提とする(handoff/05 §7)。
+- 自動テスト: `QualityTest` 7 件、`MainActivityRecreateTest` 1 件、`EditorMemoryTest` 1 件を追加。全 instrumentation テスト 24 件が成功した。`detekt` / `ktlint` / `lintDebug` / `assembleDebug` / ユニットテストも成功。
+- 完全オフライン: マニフェストに `INTERNET` と `ACCESS_NETWORK_STATE` が無いことをテストで確認。エミュレータを機内モードにして全 instrumentation テスト 24 件を実行し、成功した。
+- サンドボックス非対応: 既存の `StartupScreenTest` で非対応案内文言を確認。`JavaScriptSandbox.isSupported()` と `typeof WebAssembly` の検査は起動時に実行される。
+- 結果の決定性: 同一エンジン・同一入力で `run()` を 2 回実行し、完成 RGBA の SHA-256 が一致することを確認。部分結果の行範囲が先頭から連続していることも確認した。
+- メタデータ不在: GPS・Make・Model を付与した JPEG をデコードして PNG 保存し、出力を `ExifInterface` で確認。GPS / Make / Model / DateTime / ImageDescription はいずれも空だった。
+- 回転: `ActivityScenario.recreate()` で Activity を再生成し、クラッシュしないことを確認。状態は Activity スコープの ViewModel が保持する。
+- プロセス死: アプリをバックグラウンドへ移動後、`adb shell am kill` でプロセスを終了し、再起動。クラッシュせず起動画面から再初期化されることを確認した(編集状態は復元しない)。
+- 性能・転送(S-mid / S-large、コア内部メトリクスと Kotlin 側の実測):
+
+| 条件 | P1 | P2 | P3 | P4 | コア合計 | `run` 実測 | メイン設定 | タイル追加 |
+|---|---|---|---|---|---|---|---|---|
+| S-mid: 4000×3000、300 枚 | 204 ms | 21 ms | 836 ms | 1,580 ms | 2,641 ms | 8,592 ms | 379 ms | 15,870 ms |
+| S-large: 4000×3000、2,000 枚 | 198 ms | 73 ms | 7,367 ms | 1,549 ms | 9,187 ms | 15,111 ms | 325 ms | 105,342 ms |
+
+  - S-mid の P4 はデスクトップ目標 1,000 ms を超えるが、Android は端末差が大きいため絶対目標を設けない。同一端末でのリグレッション監視に使う。
+  - S-large は 2,000 枚でも isolate のメモリ上限内で完了した。タイルの合成サムネイルは 16×16 入力で `tiles_bytes=2,048,000`。
+  - 転送は evaluate フォールバック経路のため、タイル 1 枚ごとに制御要求が発生する。300 枚で約 15.9 秒、2,000 枚で約 105 秒かかる。UI は読み込み進捗を表示するが、タイル一括登録 API は A4 のフィードバック候補とする。
+- アプリ層メモリ: 12MP(4096×3072)のメイン画像と 50 枚のタイルで ViewModel 経由の生成が完了することを確認した。Bitmap の画素データはネイティブヒープに置かれるため、Java ヒープの OOM とは別に監視する。
+- 判明した問題と修正: evaluate フォールバックで 12MP の完成 RGBA を受ける際、`ByteArrayOutputStream` の伸長と `toByteArray()` の複製で Java ヒープが OOM した。応答の `length` を先に受け取り、チャンク到着時に最終サイズの `ByteArray` を一度だけ確保する方式へ変更し、OOM を解消した。
+- `getMetrics` を Kotlin の `CoreEngine` と host.js の control に追加し、実機テストからメトリクス JSON を取得できるようにした。
+
 ## 8. コア インターフェースへのフィードバック(A4、以後継続)
 
 Android 実装で典型的に浮上する課題と、その扱い:
@@ -225,7 +249,7 @@ Android 実装で典型的に浮上する課題と、その扱い:
 - [x] A1: Photo Picker・Kotlin デコード・保存・共有
 - [x] A2: MessagePort 連携(進捗・部分描画・キャンセル)、UI を Web 仕様どおりに実装
 - [x] A2-2: WebView 機能判定と Graceful Degradation(MessagePort → named data + evaluate → Base64 evaluate)
-- [ ] A3: 品質確認(オフライン・決定性・性能・転送・メモリ・回転・プロセス死)
+- [x] A3: 品質確認(オフライン・決定性・性能・転送・メモリ・回転・プロセス死)
 - [ ] A4: フィードバックの運用開始(課題の仕分けルールをチームで共有)
 
 ## 10. Web 側へ返すべき合意事項(M4 凍結時に確認)

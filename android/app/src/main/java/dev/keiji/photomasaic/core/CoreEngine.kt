@@ -68,6 +68,9 @@ interface CoreEngine : AutoCloseable {
     /** 実行中の生成をバッチ境界でキャンセルする */
     suspend fun cancel()
 
+    /** コア内部の計測結果(handoff/05 §4 のメトリクス JSON)を取得する */
+    suspend fun getMetrics(): String
+
     /** 現在の設定パラメータを取得する */
     suspend fun getConfig(): MosaicConfig
 

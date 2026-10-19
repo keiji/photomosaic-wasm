@@ -102,6 +102,8 @@ private class FakeCoreEngine(
 
     override suspend fun cancel() = notUsed()
 
+    override suspend fun getMetrics(): String = notUsed()
+
     override suspend fun getConfig(): MosaicConfig = notUsed()
 
     override suspend fun setConfig(config: MosaicConfig) = notUsed()

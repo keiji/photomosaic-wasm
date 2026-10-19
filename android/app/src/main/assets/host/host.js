@@ -339,6 +339,10 @@ async function pmHandleControl(message) {
         pmRespond(message.id, {});
         break;
       }
+      case 'getMetrics': {
+        pmRespond(message.id, { metrics: JSON.parse(wasm_bindgen.get_metrics()) });
+        break;
+      }
       case 'getConfig': {
         pmRespond(message.id, { config: JSON.parse(wasm_bindgen.get_config()) });
         break;

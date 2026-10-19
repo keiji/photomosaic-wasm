@@ -28,7 +28,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -72,7 +71,8 @@ class JsCoreEngine(
     private var pendingResultMeta: ResultMeta? = null
 
     // evaluate トランスポート用。ポーラーだけが触る
-    private val fallbackBuffer = ByteArrayOutputStream()
+    private var fallbackBuffer: ByteArray? = null
+    private var fallbackOffset = 0
     private var fallbackExpectedLength = 0
 
     @Volatile
@@ -280,6 +280,11 @@ class JsCoreEngine(
 
     override suspend fun cancel() {
         sendCancel()
+    }
+
+    override suspend fun getMetrics(): String {
+        val response = requestJson { JSONObject().put("type", "getMetrics") }
+        return response.getJSONObject("metrics").toString()
     }
 
     override suspend fun getConfig(): MosaicConfig {
@@ -516,10 +521,32 @@ class JsCoreEngine(
         }
     }
 
+    private fun prepareFallbackBuffer(length: Int) {
+        fallbackExpectedLength = length
+        fallbackOffset = 0
+        // MessagePort 経路では直後に ArrayBuffer が届くため、控えのバッファは確保しない
+        fallbackBuffer = if (messagePort == null && length > 0) ByteArray(length) else null
+    }
+
+    private fun resetFallbackBuffer() {
+        fallbackBuffer = null
+        fallbackOffset = 0
+        fallbackExpectedLength = 0
+    }
+
     private fun appendFallbackChunk(data: String) {
+        val expected = fallbackExpectedLength
+        if (expected < 0) {
+            throw CoreException("binary response length is missing")
+        }
+        val buffer = fallbackBuffer ?: ByteArray(expected).also { fallbackBuffer = it }
         val decoded = Base64.decode(data, Base64.DEFAULT)
-        fallbackBuffer.write(decoded)
-        if (fallbackBuffer.size() >= fallbackExpectedLength) {
+        if (fallbackOffset + decoded.size > expected) {
+            throw CoreException("binary response is larger than declared length")
+        }
+        decoded.copyInto(buffer, fallbackOffset)
+        fallbackOffset += decoded.size
+        if (fallbackOffset >= expected) {
             completeFallbackBinary()
         }
     }
@@ -527,12 +554,16 @@ class JsCoreEngine(
     @Suppress("ReturnCount")
     private fun completeFallbackBinary() {
         val expected = fallbackExpectedLength
-        var bytes = fallbackBuffer.toByteArray()
-        fallbackBuffer.reset()
-        fallbackExpectedLength = 0
-        if (expected in 0..bytes.size) {
-            bytes = bytes.copyOf(expected)
-        }
+        val buffer = fallbackBuffer
+        val offset = fallbackOffset
+        resetFallbackBuffer()
+        val bytes =
+            when {
+                expected == 0 -> ByteArray(0)
+                buffer == null -> ByteArray(0)
+                offset == expected -> buffer
+                else -> buffer.copyOf(offset)
+            }
 
         val binaryId = pendingBinaryRequestId
         if (binaryId != null) {
@@ -573,8 +604,7 @@ class JsCoreEngine(
         pendingBinaryRequestId = null
         pendingBatchMeta = null
         pendingResultMeta = null
-        fallbackBuffer.reset()
-        fallbackExpectedLength = 0
+        resetFallbackBuffer()
         activeGeneration?.trySend(GenerationEvent.Failed(error.message ?: "evaluate transport failed"))
     }
 
@@ -612,8 +642,7 @@ class JsCoreEngine(
                         width = json.getInt("width"),
                         length = length,
                     )
-                fallbackExpectedLength = length
-                fallbackBuffer.reset()
+                prepareFallbackBuffer(length)
             }
             "result" -> {
                 val length = json.optInt("length", -1)
@@ -623,8 +652,7 @@ class JsCoreEngine(
                         height = json.getInt("height"),
                         length = length,
                     )
-                fallbackExpectedLength = length
-                fallbackBuffer.reset()
+                prepareFallbackBuffer(length)
             }
             "error" ->
                 activeGeneration?.trySend(
@@ -657,8 +685,7 @@ class JsCoreEngine(
         if (json.optBoolean("binary", false)) {
             val length = json.optInt("length", 0)
             pendingBinaryRequestId = id
-            fallbackExpectedLength = length
-            fallbackBuffer.reset()
+            prepareFallbackBuffer(length)
             if (length == 0) {
                 pendingBinaryRequestId = null
                 pendingRequests.remove(id)?.binary?.complete(ByteArray(0))
@@ -760,8 +787,7 @@ class JsCoreEngine(
         pendingBinaryRequestId = null
         pendingBatchMeta = null
         pendingResultMeta = null
-        fallbackBuffer.reset()
-        fallbackExpectedLength = 0
+        resetFallbackBuffer()
     }
 
     private fun stopPolling() {

@@ -184,6 +184,8 @@ private class FakeCoreEngine : CoreEngine {
 
     override suspend fun cancel() = Unit
 
+    override suspend fun getMetrics(): String = """{"core_version":"v","runs":[]}"""
+
     override suspend fun getConfig(): MosaicConfig = MosaicConfig()
 
     override suspend fun setConfig(config: MosaicConfig) = Unit
