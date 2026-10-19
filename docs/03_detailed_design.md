@@ -356,6 +356,7 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 | P3 MATCH | タイルをマッチング中… | コア |
 | P4 COMPOSE | 合成中… | コア |
 | P5 EXPORT | 保存中… | ホスト/UI 層(コア進捗には含まれない) |
+| DONE | 合成終了 | UI 層(生成完了時。コアの `phase_code` ではない) |
 
 ### 7.2 イベント発火ルール
 
@@ -416,7 +417,7 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 
 ## 10. 性能目標と計測
 
-フェーズごとの所要時間はコア内部で常時計測され `getMetrics()` で取得できる。Android では Kotlin の `CoreEngine.getMetrics()` と host.js の `getMetrics` control を経由してメトリクス JSON を取得する。
+フェーズごとの所要時間はコア内部で常時計測され `getMetrics()` で取得できる。Android では Kotlin の `CoreEngine.getMetrics()` と host.js の `getMetrics` control を経由してメトリクス JSON を取得する。Web の開発ビルドは直近 run のサマリをオーバーレイ表示し、Android は合成終了後にサマリを表示する。どちらも表示の右側にコピーアイコンを置き、メトリクス JSON をクリップボードへコピーできる。
 目標値・計測方法の詳細は [性能計測設計](./handoff/05_performance_measurement.md) を参照。
 
 参考目標(ミッドレンジデスクトップ、メイン 12MP / タイル 300 枚 / ブロック 24px):

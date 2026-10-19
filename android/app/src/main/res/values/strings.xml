@@ -45,6 +45,10 @@
     <string name="editor_phase_tile_analyze">構成画像を解析中…</string>
     <string name="editor_phase_match">タイルをマッチング中…</string>
     <string name="editor_phase_compose">合成中…</string>
+    <string name="editor_phase_done">合成終了</string>
+    <string name="editor_metrics_title">メトリクス</string>
+    <string name="editor_metrics_copy">メトリクスをコピー</string>
+    <string name="editor_metrics_empty">メトリクスはありません</string>
     <string name="editor_cancel">キャンセル</string>
     <string name="editor_tiles_required">構成画像を追加してください</string>
     <string name="editor_save">保存</string>

@@ -113,7 +113,7 @@ class EditorViewModelTest {
             viewModel.addTiles(listOf(Uri.parse("content://test/1")))
             await { viewModel.uiState.value.tiles.size == 1 }
             viewModel.enterEdit()
-            await { viewModel.uiState.value.resultReady }
+            await { viewModel.uiState.value.resultReady && viewModel.uiState.value.metrics != null }
             assertEquals(EditorStage.Edit, viewModel.uiState.value.screen)
             assertTrue(viewModel.uiState.value.preview != null)
             assertEquals(
@@ -121,6 +121,28 @@ class EditorViewModelTest {
                     ?.totalBlocks,
                 viewModel.uiState.value.progress
                     ?.assignedBlocks,
+            )
+            assertEquals(
+                "done",
+                viewModel.uiState.value.progress
+                    ?.phaseCode,
+            )
+            val metrics = viewModel.uiState.value.metrics
+            assertTrue(metrics != null)
+            assertTrue(
+                metrics
+                    ?.summary
+                    ?.contains("trigger: initial") == true,
+            )
+            assertTrue(
+                metrics
+                    ?.summary
+                    ?.contains("P4 79ms") == true,
+            )
+            assertTrue(
+                metrics
+                    ?.rawJson
+                    ?.contains("\"run_id\": 1") == true,
             )
         }
 
@@ -194,7 +216,29 @@ private class FakeCoreEngine : CoreEngine {
 
     override suspend fun cancel() = Unit
 
-    override suspend fun getMetrics(): String = """{"core_version":"v","runs":[]}"""
+    override suspend fun getMetrics(): String =
+        """
+        {
+          "core_version": "v",
+          "runs": [
+            {
+              "run_id": 1,
+              "trigger": "initial",
+              "phases": {
+                "P1_MAIN_ANALYZE": { "ms": 12.4 },
+                "P2_TILE_ANALYZE": { "ms": 34.6, "tiles": 1 },
+                "P3_MATCH": { "ms": 56.7, "batches": 2 },
+                "P4_COMPOSE": { "ms": 78.9, "batches": 2 }
+              },
+              "spans": {
+                "p3_match_batch": { "count": 2, "avg_ms": 28.0, "max_ms": 31.0 },
+                "p4_compose_batch": { "count": 2, "avg_ms": 39.0, "max_ms": 44.0 }
+              },
+              "memory": { "wasm_heap_bytes": 1048576, "tiles_bytes": 2048000 }
+            }
+          ]
+        }
+        """.trimIndent()
 
     override suspend fun getConfig(): MosaicConfig = MosaicConfig()
 

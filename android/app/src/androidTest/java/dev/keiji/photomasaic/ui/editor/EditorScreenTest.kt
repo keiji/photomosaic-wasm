@@ -2,10 +2,14 @@
 
 package dev.keiji.photomasaic.ui.editor
 
+import android.content.ClipboardManager
 import android.graphics.Bitmap
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.keiji.photomasaic.R
 import dev.keiji.photomasaic.core.GridInfo
@@ -89,5 +93,47 @@ class EditorScreenTest {
         composeTestRule
             .onNodeWithText(composeTestRule.activity.getString(R.string.editor_save))
             .assertExists()
+    }
+
+    @Test
+    fun completedStateShowsDoneAndCopiesMetrics() {
+        val preview = Bitmap.createBitmap(100, 50, Bitmap.Config.ARGB_8888)
+        val tileBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        val rawMetrics = """{"runs":[{"run_id":1}]}"""
+        composeTestRule.setContent {
+            EditorScreen(
+                state =
+                    EditorUiState(
+                        coreVersion = "v",
+                        screen = EditorStage.Edit,
+                        mainImage = MainImageUi(preview, 100, 50, scaled = false),
+                        tiles = listOf(TileUi(1L, tileBitmap)),
+                        grid = GridInfo(100, 50, 24, 5, 3, 15),
+                        preview = preview,
+                        progress = GenerationProgressUi("done", 1f, 1f, 15, 15),
+                        metrics = MetricsUi("[metrics #1] trigger: initial", rawMetrics),
+                        resultReady = true,
+                        config =
+                            dev.keiji.photomasaic.core
+                                .MosaicConfig(),
+                    ),
+                actions = EditorActions(),
+            )
+        }
+        composeTestRule
+            .onNodeWithText(composeTestRule.activity.getString(R.string.editor_phase_done))
+            .assertExists()
+        composeTestRule
+            .onNodeWithText(composeTestRule.activity.getString(R.string.editor_metrics_title))
+            .assertExists()
+        composeTestRule
+            .onNodeWithText("[metrics #1] trigger: initial")
+            .assertExists()
+        composeTestRule
+            .onNodeWithContentDescription(composeTestRule.activity.getString(R.string.editor_metrics_copy))
+            .performScrollTo()
+            .performClick()
+        val clipboard = composeTestRule.activity.getSystemService(ClipboardManager::class.java)
+        org.junit.Assert.assertEquals(rawMetrics, clipboard.primaryClip?.getItemAt(0)?.text)
     }
 }

@@ -171,7 +171,7 @@ progress.collectAsState().value.let { event ->
 - プロトコル(`core/CoreModels.kt` / `core/JsCoreEngine.kt`): 制御は文字列 JSON、Kotlin → JS の RGBA は named data(`dataRef` のみを送る)、JS → Kotlin の部分結果・完成画像は JSON の直後に 512 KiB 以下の ArrayBuffer チャンクを送る方式で実装した。要求と応答は `id` で対応付け、60 秒でタイムアウトする。A2-2 で MessagePort 非対応時の evaluate フォールバックを追加した(§6.2)。
 - バッチ駆動(`assets/host/host.js`): サンドボックスに `setTimeout` が無いため、`begin_run` / `begin_rematch` 後の 1 バッチごとに `stepDone` を送り、Kotlin が `step` を返すハンドシェイクでバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。進捗は `progress`、部分結果は `batchDone` + バイナリ、完成は `result` + バイナリとして送る。
 - 部分描画: `batchDone` の行範囲をグリッド全体の Bitmap へ `Canvas.drawBitmap` で転写し、`previewRevision` で Compose の再描画を促す。完成時は完成 RGBA を Bitmap 化して保存・共有に使う。
-- S2 UI(`ui/editor/EditorScreen.kt` / `EditorViewModel.kt`): プレビュー(タップでメイン画像変更)、ブロックサイズ(8〜128px、300ms デバウンス)、メイン画像ブレンド(0〜0.8)、色補正(0〜1.0)、重複閾値(0.5〜8.0)、進捗バー(割当/全体・フェーズ・開閉)、キャンセル、構成画像の追加/削除(編集中は差分再マッチ)、保存/共有、戻る(全状態クリア)を実装した。保存は完成時のみ有効。API 26〜28 では保存前に `WRITE_EXTERNAL_STORAGE` を要求する。
+- S2 UI(`ui/editor/EditorScreen.kt` / `EditorViewModel.kt`): プレビュー(タップでメイン画像変更)、ブロックサイズ(8〜128px、300ms デバウンス)、メイン画像ブレンド(0〜0.8)、色補正(0〜1.0)、重複閾値(0.5〜8.0)、進捗バー(割当/全体・フェーズ・開閉)、キャンセル、構成画像の追加/削除(編集中は差分再マッチ)、保存/共有、戻る(全状態クリア)を実装した。保存は完成時のみ有効。API 26〜28 では保存前に `WRITE_EXTERNAL_STORAGE` を要求する。生成完了時はフェーズを「合成終了」に切り替え、直近 run のメトリクスサマリとコピーアイコンを表示する。
 - コア共有(`MainActivity.kt` / `StartupViewModel.kt`): 起動検査と編集画面で同一の `JsCoreEngine` を Activity スコープの `StartupViewModel` 経由で共有し、画面遷移でサンドボックスを作り直さない。
 - 検証: `compileDebugKotlin` / `compileDebugAndroidTestKotlin` / `detekt` / `ktlint` / `lintDebug` / ユニットテスト 13 件が成功。実機テストは 15 件中 14 件成功・1 件スキップ(A2 時点)。スキップした `JsCoreEngineTest` は、検証用エミュレータの WebView 133/134 が `JS_FEATURE_MESSAGE_PORTS` を公開しないため `Assume` でスキップした。A2-2 でスキップを解除し、named data + evaluate フォールバック経路で生成できることを確認した(§6.2)。
 - 既知の制約: MessagePort 非対応端末では evaluate フォールバックを使うため、MessagePort 経路より転送コストが大きい。Base64 evaluate 経路はさらに転送コストが大きい。
@@ -280,7 +280,7 @@ A4 は本書をフィードバックの正本として運用する。新しい�
 | A4-06 | Display P3 などの広色域入力の正規化が未検証 | SPEC / QA | 未確認 | P2 | P3 画像を Web / Android で比較し、sRGB 変換ルールを仕様化する | Open |
 | A4-07 | プロセス死後に編集状態を復元しない(起動画面から再初期化) | SPEC | - | P3 | 再初期化で許容するか、`SavedStateHandle` 等で復元するかを決定する | Open |
 | A4-08 | evaluate ポーラーがアイドル時も 16 / 50ms 間隔で動作する | HOST | - | P3 | アイドル時の停止・間隔延長を検討し、消費電力を測る | Open |
-| A4-09 | メトリクスは instrumentation テストからのみ取得できる | HOST | - | P3 | デバッグビルド限定の共有導線を検討する | Open |
+| A4-09 | メトリクスは instrumentation テストからのみ取得できる | HOST | - | P3 | 生成完了時にアプリ内へ表示し、JSON をコピーできるようにする | Fixed(2026-10-19、§6.1) |
 | A4-10 | WebView の機能差により選択されるトランスポートが端末ごとに異なる | QA | - | P3 | 実機マトリクスで feature 値と選択経路を記録する | Open(Pixel 8a は `message_port` を確認済み) |
 
 ### 8.2 A4-01 実施結果(2026-10-19)

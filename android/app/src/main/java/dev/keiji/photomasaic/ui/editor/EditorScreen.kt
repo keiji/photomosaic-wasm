@@ -3,6 +3,8 @@
 package dev.keiji.photomasaic.ui.editor
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -25,6 +27,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -44,7 +48,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -249,6 +255,7 @@ private fun EditContent(
             ConfigControls(config = config, actions = actions)
         }
         ProgressPanel(state = state, actions = actions)
+        state.metrics?.let { MetricsPanel(it) }
         TilesCard(
             state = state,
             showAllTiles = showAllTiles,
@@ -481,6 +488,43 @@ private fun ProgressPanel(
 }
 
 @Composable
+private fun MetricsPanel(metrics: MetricsUi) {
+    val context = LocalContext.current
+    val copyLabel = stringResource(R.string.editor_metrics_copy)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.editor_metrics_title),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                text = metrics.summary.ifEmpty { stringResource(R.string.editor_metrics_empty) },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        IconButton(
+            onClick = {
+                val clipboard = context.getSystemService(ClipboardManager::class.java)
+                clipboard?.setPrimaryClip(ClipData.newPlainText("metrics", metrics.rawJson))
+            },
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_content_copy),
+                contentDescription = copyLabel,
+            )
+        }
+    }
+}
+
+@Composable
 private fun ResultActions(
     canUseResult: Boolean,
     onShare: () -> Unit,
@@ -578,6 +622,7 @@ private fun phaseLabel(code: String): String =
         "tile_analyze" -> stringResource(R.string.editor_phase_tile_analyze)
         "match" -> stringResource(R.string.editor_phase_match)
         "compose" -> stringResource(R.string.editor_phase_compose)
+        "done" -> stringResource(R.string.editor_phase_done)
         else -> code
     }
 

@@ -348,6 +348,32 @@ body {
   transition: width 0.2s ease;
 }
 
+.metrics-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #e6e6e6;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.metrics-copy:hover,
+.metrics-copy:focus-visible {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.metrics-copy:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 #progress-label,
 #phase-label {
   font-size: 0.85rem;

@@ -70,7 +70,12 @@ export const messages = {
   phaseTileAnalyze: 'タイルを解析中…',
   phaseMatch: 'タイルをマッチング中…',
   phaseCompose: '合成中…',
+  /** 生成完了後の表示(コアの phase_code ではない UI 専用の完了状態) */
+  phaseDone: '合成終了',
   phaseExport: '保存中…',
+
+  // メトリクス表示
+  metricsCopyLabel: 'メトリクスをコピー',
 
   // エラー(インライン表示)
   errorInvalidFile: '対応していないファイル形式です(画像ファイルを指定してください)',
@@ -97,6 +102,8 @@ export function phaseLabelFor(code: string): string {
       return messages.phaseMatch;
     case 'compose':
       return messages.phaseCompose;
+    case 'done':
+      return messages.phaseDone;
     default:
       return messages.phaseIdle;
   }

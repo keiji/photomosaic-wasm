@@ -21,6 +21,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -68,8 +69,18 @@ class EditorMemoryTest {
             viewModel.addTiles(List(APP_TILE_COUNT) { Uri.parse("content://test/tile/$it") })
             await { viewModel.uiState.value.loading == null }
             viewModel.enterEdit()
-            await { viewModel.uiState.value.resultReady }
+            await { viewModel.uiState.value.resultReady && viewModel.uiState.value.metrics != null }
             assertTrue(viewModel.uiState.value.preview != null)
+            assertEquals(
+                "done",
+                viewModel.uiState.value.progress
+                    ?.phaseCode,
+            )
+            assertTrue(
+                viewModel.uiState.value.metrics
+                    ?.summary
+                    ?.contains("trigger:") == true,
+            )
         }
 
     private suspend fun await(predicate: () -> Boolean) {

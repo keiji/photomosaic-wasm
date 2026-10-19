@@ -502,7 +502,7 @@ async function main(): Promise<void> {
       const data = store.getData();
       const total = data.totalBlocks ?? 0;
       progress.setCounts(total, total);
-      progress.setPhase(phaseLabelFor('compose'));
+      progress.setPhase(messages.phaseDone);
       const img = await core.exportImage();
       preview.drawCompleted(img);
     } catch (err) {

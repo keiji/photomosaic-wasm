@@ -38,6 +38,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.util.Locale
+import kotlin.math.roundToInt
 
 /** 初期ブロックサイズ(基本設計書 2.2 の既定値) */
 private const val DEFAULT_BLOCK_SIZE = 24
@@ -77,6 +80,12 @@ data class GenerationProgressUi(
     val totalBlocks: Int,
 )
 
+/** 合成終了時に表示するメトリクス(表示用サマリとコピー用の元 JSON) */
+data class MetricsUi(
+    val summary: String,
+    val rawJson: String,
+)
+
 /** 操作結果の通知(A2) */
 enum class EditorNotice {
     GenerationFailed,
@@ -99,6 +108,7 @@ data class EditorUiState(
     val preview: Bitmap? = null,
     val previewRevision: Long = 0,
     val progress: GenerationProgressUi? = null,
+    val metrics: MetricsUi? = null,
     val generating: Boolean = false,
     val resultReady: Boolean = false,
     val saving: Boolean = false,
@@ -142,7 +152,7 @@ data class EditorActions(
  * 画像の選択・デコード・一覧管理に加え、コアの生成フロー(進捗・部分結果・
  * 完成画像)を購読し、プレビュー用 Bitmap と進捗を状態へ反映する。
  */
-@Suppress("TooManyFunctions", "TooGenericExceptionCaught")
+@Suppress("TooManyFunctions", "TooGenericExceptionCaught", "LargeClass")
 class EditorViewModel(
     private val coreVersion: String,
     private val core: CoreEngine,
@@ -201,6 +211,7 @@ class EditorViewModel(
                         preview = preview,
                         previewRevision = it.previewRevision + 1,
                         progress = null,
+                        metrics = null,
                         resultReady = false,
                     )
                 }
@@ -303,6 +314,7 @@ class EditorViewModel(
                             preview = gridPreview,
                             previewRevision = it.previewRevision + 1,
                             progress = null,
+                            metrics = null,
                             resultReady = false,
                         )
                     }
@@ -376,6 +388,7 @@ class EditorViewModel(
                             preview = preview,
                             previewRevision = it.previewRevision + 1,
                             progress = null,
+                            metrics = null,
                             resultReady = false,
                         )
                     }
@@ -558,6 +571,7 @@ class EditorViewModel(
                 preview = base,
                 previewRevision = it.previewRevision + 1,
                 progress = GenerationProgressUi("match", 0f, 0f, 0, grid.totalBlocks),
+                metrics = null,
             )
         }
         generationJob =
@@ -571,7 +585,7 @@ class EditorViewModel(
                         when (event) {
                             is GenerationEvent.Progress -> onProgress(event.event)
                             is GenerationEvent.Batch -> onBatch(event.batch)
-                            is GenerationEvent.Completed -> onCompleted(event.image)
+                            is GenerationEvent.Completed -> onCompleted(event.image, token)
                             GenerationEvent.Canceled -> {
                                 _uiState.update {
                                     it.copy(generating = false, notice = EditorNotice.Canceled)
@@ -644,30 +658,137 @@ class EditorViewModel(
         }
     }
 
-    private suspend fun onCompleted(image: RgbaImage) {
+    private suspend fun onCompleted(
+        image: RgbaImage,
+        token: Int,
+    ) {
         val bitmap =
             withContext(Dispatchers.Default) {
                 rgbaToBitmap(image.width, image.height, image.data)
             }
+        if (token != generationToken) {
+            return
+        }
         resultBitmap = bitmap
         mosaicBitmap = null
         _uiState.update {
+            val totalBlocks = it.grid?.totalBlocks ?: it.progress?.totalBlocks ?: 0
+            val progress =
+                (it.progress ?: GenerationProgressUi("done", 1f, 1f, totalBlocks, totalBlocks))
+                    .copy(
+                        phaseCode = "done",
+                        phaseRatio = 1f,
+                        overallRatio = 1f,
+                        assignedBlocks = totalBlocks,
+                        totalBlocks = totalBlocks,
+                    )
             it.copy(
                 preview = bitmap,
                 previewRevision = it.previewRevision + 1,
                 generating = false,
                 resultReady = true,
-                progress =
-                    it.progress?.copy(
-                        phaseCode = "compose",
-                        phaseRatio = 1f,
-                        overallRatio = 1f,
-                        assignedBlocks = it.grid?.totalBlocks ?: it.progress.assignedBlocks,
-                        totalBlocks = it.grid?.totalBlocks ?: it.progress.totalBlocks,
-                    ),
+                progress = progress,
             )
         }
+        val rawMetrics =
+            try {
+                core.getMetrics()
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                Log.w(LOG_TAG, "failed to read metrics", err)
+                null
+            }
+        val metrics = rawMetrics?.let(::parseMetrics)
+        if (token != generationToken || metrics == null) {
+            return
+        }
+        _uiState.update { it.copy(metrics = metrics) }
     }
+
+    /** コアのメトリクス JSON から直近 run の表示用サマリを作る */
+    private fun parseMetrics(raw: String): MetricsUi? {
+        val root =
+            runCatching { JSONObject(raw) }
+                .onFailure { Log.w(LOG_TAG, "failed to parse metrics", it) }
+                .getOrNull()
+        val run =
+            root
+                ?.optJSONArray("runs")
+                ?.let { runs ->
+                    if (runs.length() > 0) {
+                        runs.optJSONObject(runs.length() - 1)
+                    } else {
+                        null
+                    }
+                }
+        val pretty =
+            root
+                ?.let { runCatching { it.toString(2) }.getOrDefault(raw) }
+                ?: raw
+        return if (run == null) {
+            null
+        } else {
+            MetricsUi(summary = formatMetricsRun(run), rawJson = pretty)
+        }
+    }
+
+    private fun formatMetricsRun(run: JSONObject): String {
+        val phases = run.optJSONObject("phases")
+        val p1 = phases?.optJSONObject("P1_MAIN_ANALYZE")?.optDouble("ms", 0.0) ?: 0.0
+        val p2 = phases?.optJSONObject("P2_TILE_ANALYZE")
+        val p3 = phases?.optJSONObject("P3_MATCH")
+        val p4 = phases?.optJSONObject("P4_COMPOSE")
+        val spans = run.optJSONObject("spans")
+        val p3Max = spans?.optJSONObject("p3_match_batch")?.optDouble("max_ms", Double.NaN) ?: Double.NaN
+        val p4Max = spans?.optJSONObject("p4_compose_batch")?.optDouble("max_ms", Double.NaN) ?: Double.NaN
+        val tilesBytes = run.optJSONObject("memory")?.optLong("tiles_bytes", 0L) ?: 0L
+        return buildString {
+            append("[metrics #")
+            append(run.optInt("run_id", 0))
+            append("] trigger: ")
+            append(run.optString("trigger", "-"))
+            append('\n')
+            append("P1 ")
+            append(formatMetricMs(p1))
+            append(" | P2 ")
+            append(formatMetricMs(p2?.optDouble("ms", 0.0) ?: 0.0))
+            append(" (")
+            append(p2?.optInt("tiles", 0) ?: 0)
+            append(") | P3 ")
+            append(formatMetricMs(p3?.optDouble("ms", 0.0) ?: 0.0))
+            append(" (")
+            append(p3?.optInt("batches", 0) ?: 0)
+            append(") | P4 ")
+            append(formatMetricMs(p4?.optDouble("ms", 0.0) ?: 0.0))
+            append(" (")
+            append(p4?.optInt("batches", 0) ?: 0)
+            append(')')
+            append('\n')
+            append("batch max: P3 ")
+            append(formatMetricMax(p3Max))
+            append(" / P4 ")
+            append(formatMetricMax(p4Max))
+            append(" | tiles ")
+            append(formatMetricBytes(tilesBytes))
+        }
+    }
+
+    private fun formatMetricMs(value: Double): String = "${value.roundToInt()}ms"
+
+    private fun formatMetricMax(value: Double): String =
+        if (value.isNaN()) {
+            "-"
+        } else {
+            formatMetricMs(value)
+        }
+
+    private fun formatMetricBytes(bytes: Long): String =
+        if (bytes >= MIB) {
+            String.format(Locale.US, "%.1fMB", bytes.toDouble() / MIB)
+        } else {
+            "${Math.round(bytes.toDouble() / KIB)}KB"
+        }
 
     /** ブロック平均色(RGB 3 バイト × ブロック数)をグリッド表示用 Bitmap へ描く */
     private fun meanColorsBitmap(
@@ -711,6 +832,8 @@ class EditorViewModel(
         private const val BYTES_PER_PIXEL = 4
         private const val RGB_CHANNELS = 3
         private const val CHANNEL_MASK = 0xff
+        private const val KIB = 1024.0
+        private const val MIB = 1024.0 * 1024.0
 
         /** アプリの Context から実装(端末内デコーダ・MediaStore)を組み立てる */
         fun factory(
