@@ -112,6 +112,42 @@ export interface TileInfo {
 }
 
 /**
+ * コアの計測結果 1 スパン(handoff/05 §3 の累計・回数・最大・平均)
+ */
+export interface MetricsSpan {
+  count: number;
+  avgMs: number;
+  maxMs: number;
+}
+
+/**
+ * コアの計測結果 1 run 分(getMetrics の出力。handoff/05 §4 スキーマ)。
+ * 開発オーバーレイ・ベンチでの表示に使う(ゴールデン判定には使わない)
+ */
+export interface MetricsRun {
+  runId: number;
+  trigger: string;
+  /** ホスト時計の開始時刻 ms(時計なしコアでは 0) */
+  startedAtMs: number;
+  phases: {
+    P1_MAIN_ANALYZE: { ms: number };
+    P2_TILE_ANALYZE: { ms: number; tiles: number };
+    P3_MATCH: { ms: number; batches: number };
+    P4_COMPOSE: { ms: number; batches: number };
+  };
+  spans: {
+    p1_grid?: MetricsSpan;
+    p1_block_features?: MetricsSpan;
+    p2_tile_analyze?: MetricsSpan;
+    p2_index_build?: MetricsSpan;
+    p3_match_batch?: MetricsSpan;
+    p4_compose_batch?: MetricsSpan;
+  };
+  memory: { wasmHeapBytes: number; tilesBytes: number };
+  config: { block_size: number; w_c: number; w_d: number; alpha: number; row_batch: number };
+}
+
+/**
  * コアの論理 API。
  * M2 で setMainImage / getBlockMeanColors の実処理(P1)を WASM で行う。
  * M3 でタイル系(addTile/removeTile/clearTiles)を追加した(P2)。
@@ -171,6 +207,11 @@ export interface CoreBridge {
   setConfig(config: MosaicConfig): Promise<void>;
   /** 完成画像(または現時点までの合成結果)の RGBA を取得する(P5 のエンコード前段) */
   exportImage(): Promise<RgbaImage>;
+  /**
+   * コアの計測結果(JSON)を取得する(M7: handoff/05 §4 getMetrics)。
+   * run 実行履歴の直近 16 分を返す。モック実装では null(計測なし)
+   */
+  getMetrics(): Promise<MetricsRun[]>;
   /** 進捗イベント受け取り登録(スロットリングはコアが行う。詳細設計書 7.2) */
   onProgress(callback: ProgressCallback): void;
   /** 部分結果(行バッチ単位の合成済み行)受け取り登録(詳細設計書 7.4) */

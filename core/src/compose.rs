@@ -145,39 +145,54 @@ fn draw_block_cell(
     let thumb_h_f = f64::from(thumb_h);
     let bw_f = f64::from(bw as u32);
     let bh_f = f64::from(bh as u32);
+    // ブロック座標 → サムネイル座標の一次写像を 1 ブロック 1 回で前計算する。
+    // 1 ピクセルごとの除算(2 回/px)を意図して混ぜない(P4 性能: handoff/05 §7)
+    //   (x + 0.5) / bw * thumb_w - 0.5 → x * step_x + origin_x
+    let step_x = thumb_w_f / bw_f;
+    let step_y = thumb_h_f / bh_f;
+    let origin_x = 0.5 * step_x - 0.5;
+    let origin_y = 0.5 * step_y - 0.5;
+
     for y in 0..bh {
+        // y 行のサムネイル行と補間重みを先に確定させる(x 走査中は不変)
+        let src_y = (y as f64) * step_y + origin_y;
+        let py0 = src_y.floor();
+        let fy = src_y - py0;
+        let base_y = py0 as i64;
+        let yin = |v: i64| -> usize {
+            usize::try_from(v.clamp(0, i64::from(thumb_h) - 1)).expect("clamped to thumb_h")
+        };
+        let cy0 = yin(base_y);
+        let cy1 = yin(base_y + 1);
+        let row0 = cy0 * thumb_stride;
+        let row1 = cy1 * thumb_stride;
+        let wy0 = 1.0 - fy;
+        let wy1 = fy;
+
         for x in 0..bw {
             // タイルサムネイル上の対応位置(ピクセル中心合わせ)。
-            // ブロックローカル座標 (x, y) をサムネイル座標へ写像する
-            let src_x = ((x as u32 as f64) + 0.5) / bw_f * thumb_w_f - 0.5;
-            let src_y = ((y as u32 as f64) + 0.5) / bh_f * thumb_h_f - 0.5;
+            let src_x = (x as f64) * step_x + origin_x;
             let px0 = src_x.floor();
-            let py0 = src_y.floor();
             let fx = src_x - px0;
-            let fy = src_y - py0;
             // 補間する周辺 4 ピクセル(サムネイル境界でクランプ)。
             // floor 済みの有限値であるため as 変換(i64)は決定的で安全
             let base_x = px0 as i64;
-            let base_y = py0 as i64;
             let xin = |v: i64| -> usize {
                 usize::try_from(v.clamp(0, i64::from(thumb_w) - 1)).expect("clamped to thumb_w")
             };
-            let yin = |v: i64| -> usize {
-                usize::try_from(v.clamp(0, i64::from(thumb_h) - 1)).expect("clamped to thumb_h")
-            };
             let cx0 = xin(base_x);
             let cx1 = xin(base_x + 1);
-            let cy0 = yin(base_y);
-            let cy1 = yin(base_y + 1);
 
-            let idx00 = cy0 * thumb_stride + cx0 * 4;
-            let idx10 = cy0 * thumb_stride + cx1 * 4;
-            let idx01 = cy1 * thumb_stride + cx0 * 4;
-            let idx11 = cy1 * thumb_stride + cx1 * 4;
-            let w00 = (1.0 - fx) * (1.0 - fy);
-            let w10 = fx * (1.0 - fy);
-            let w01 = (1.0 - fx) * fy;
-            let w11 = fx * fy;
+            let idx00 = row0 + cx0 * 4;
+            let idx10 = row0 + cx1 * 4;
+            let idx01 = row1 + cx0 * 4;
+            let idx11 = row1 + cx1 * 4;
+            let wx0 = 1.0 - fx;
+            let wx1 = fx;
+            let w00 = wx0 * wy0;
+            let w10 = wx1 * wy0;
+            let w01 = wx0 * wy1;
+            let w11 = wx1 * wy1;
 
             let offset_out = ((y0 + y) * width + x0 + x) * 4;
             for c in 0..3 {

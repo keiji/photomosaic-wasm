@@ -159,6 +159,8 @@ export function begin_rematch(): void;
  */
 export function begin_run(): void;
 
+export function boot(): void;
+
 /**
  * フォトモザイクの実行をキャンセルする(詳細設計書 7.5)。
  *
@@ -198,6 +200,15 @@ export function get_block_mean_colors(): Uint8Array;
  * 現在の設定(詳細設計書 5 章)を JSON 文字列で返す(詳細設計書 2 章 getConfig)
  */
 export function get_config(): string;
+
+/**
+ * メトリクス JSON を返す(M7: handoff/05 §4 getMetrics() の出力)。
+ *
+ * 直近 16 run の分(run_id・trigger・フェーズ所要・バッチスパン・メモリ・
+ * 設定スナップショット)。UI オーバーレイやベンチでの記録に使用する。
+ * 時計が流せる環境では時間値が実測される(コアは時計を持たない)
+ */
+export function get_metrics(): string;
 
 /**
  * 登録済みタイル数(進捗の分母・UI の枚数表示に使用)
@@ -282,12 +293,14 @@ export interface InitOutput {
     readonly add_tile: (a: number, b: bigint, c: number, d: number, e: number, f: number, g: number, h: number) => void;
     readonly begin_rematch: (a: number) => void;
     readonly begin_run: (a: number) => void;
+    readonly boot: () => void;
     readonly cancel: () => void;
     readonly clear_main_image: () => void;
     readonly clear_tiles: () => void;
     readonly export_main_image: (a: number) => void;
     readonly get_block_mean_colors: (a: number) => void;
     readonly get_config: (a: number) => void;
+    readonly get_metrics: (a: number) => void;
     readonly get_tile_count: () => number;
     readonly get_tiles_memory_bytes: () => number;
     readonly get_version: (a: number) => void;
@@ -328,6 +341,7 @@ export interface InitOutput {
     readonly __wbindgen_export3: (a: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
     readonly __wbindgen_export4: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_start: () => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

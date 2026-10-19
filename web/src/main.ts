@@ -1,6 +1,12 @@
 /**
  * エントリポイント。状態遷移と UI・モックコアの結線を行う。
  *
+ * M7 のデモフロー(handoff/04: 性能と強健性):
+ *   - メトリクスオーバーレイ(開発ビルド限定)でコアのフェーズ・バッチ所要を常時表示
+ *   - Service Worker による完全オフライン化(本番ビルド)
+ *   - メモリガード超過時のサムネイル自動縮小への追従
+ *   - 巨大画像(長辺 4096px 超)は自動縮小して読み込む旨を案内
+ *
  * M6 のデモフロー(handoff/04: インタラクティブ化):
  *   S2 でのブロックサイズ変更・タイル追加/削除に生成処理が自動で追随する。
  *   - ブロックサイズ変更: デバウンス(300ms)後、P2 スキップのフル再マッチで再生成
@@ -22,6 +28,17 @@ import { Preview } from './ui/preview';
 import { ProgressPanel } from './ui/progress';
 import { Controls } from './ui/controls';
 import { TileList } from './ui/tileList';
+import { MetricsOverlay } from './ui/metricsOverlay';
+
+/** Service Worker の登録(オフライン化: 本番ビルドのみ。開発中のモジュール
+ * キャッシュ汚染を避ける)。失敗してもアプリはオンラインで動く */
+function registerServiceWorker(): void {
+  if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch((err) => {
+      console.warn('service worker registration failed', err);
+    });
+  }
+}
 
 /** タイル追加処理の 1 バッチあたりの枚数(バッチ間で UI に制御を返す) */
 const TILE_BATCH_SIZE = 8;
@@ -57,12 +74,15 @@ function applyMessages(): void {
 
 async function main(): Promise<void> {
   applyMessages();
+  registerServiceWorker();
 
   const store = new AppStore();
   const core = await createCoreBridge();
   const coreVersion = await core.getVersion();
   // コアバージョンの表示(handoff/02: UI とコアの不整合検知)
   console.info(`photomosaic core: ${coreVersion} (impl: ${getCoreImplementation()})`);
+  // メトリクスオーバーレイ(M7: handoff/05 §6。本番ビルドでは実体なし)
+  const metricsOverlay = new MetricsOverlay(document);
 
   const screenStart = requireElement<HTMLElement>('#screen-start');
   const screenEdit = requireElement<HTMLElement>('#screen-edit');
@@ -151,6 +171,10 @@ async function main(): Promise<void> {
       progress.setPhase(messages.phaseLoadMain);
       try {
         const image = await loadMainImage(file);
+        // 巨大画像ガイド(M7): 長辺上限を超えた自動縮小を案内する
+        if (image.scaled) {
+          showError(messages.mainShrunkNotice(4096));
+        }
         const grid = await core.setMainImage(image);
         store.dispatch({ type: 'MAIN_IMAGE_SET' });
         store.setBlockCounts(grid.totalBlocks, 0);
@@ -365,6 +389,13 @@ async function main(): Promise<void> {
       store.dispatch({ type: 'GENERATION_FAILED' });
       showError(messages.errorGenerate);
       progress.reset();
+    } finally {
+      // メトリクスオーバーレイを更新する(M7: handoff/05 §6。本番ビルドは no-op)
+      try {
+        metricsOverlay.update(await core.getMetrics());
+      } catch (err) {
+        console.warn('metrics refresh failed', err);
+      }
     }
   };
 
@@ -448,6 +479,7 @@ async function main(): Promise<void> {
     currentGrid = null;
     clearError();
     progress.reset();
+    metricsOverlay.clear();
     controls.setBlockSizeValue(24);
   };
   controls.handleBack(reset);

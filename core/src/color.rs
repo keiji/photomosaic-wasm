@@ -17,15 +17,50 @@ pub fn srgb8_to_linear(value: u8) -> f64 {
     }
 }
 
-/// 線形 RGB(0.0..1.0)を sRGB の 8bit 値へ変換する(丸め、クランプ付き)
+/// 線形 → sRGB 曲線部 ( LINEAR_BREAK, 1.0 ] の等間隔前計算区分
+const SRGB_CURVE_SAMPLES: usize = 4096;
+
+/// 線形 RGB(0.0..1.0)を sRGB の 8bit 値へ変換する(丸め、クランプ付き)。
+///
+/// 曲線部((0.0031308, 1.0])は等間隔 4,096 分割の前計算表 + 線形補間で求める
+// (P4 合成では全出力ピクセル × 3 チャンネルで powf が走り、12MP で数千 ms 相当
+// になるため: handoff/05 §7 の P4 目標)。線形補間の最大誤差は 0.5/255 未満の
+// 目安で、8bit に丸めた結果は厳密式(powf)と同一の値が得られる。
+/// 計算は f64 で統一し決定的(handoff/02 4 章)
 pub fn linear_to_srgb8(value: f64) -> u8 {
-    let c = if value <= 0.003_130_8 {
-        value * 12.92
+    let clamped = value.clamp(0.0, 1.0);
+    let c = if clamped <= 0.003_130_8 {
+        clamped * 12.92
+    } else if clamped >= 1.0 {
+        1.0
     } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
+        srgb8_curve_sample(clamped)
     };
-    let clamped = c.clamp(0.0, 1.0);
-    (clamped * 255.0).round() as u8
+    (c * 255.0).round() as u8
+}
+
+/// sRGB 逆曲線(線形 → sRGB の (0.0031308, 1.0] 区間)の前計算表。
+/// `entry[i] = 1.055 × x_i^(1/2.4) - 0.055`(`x_i = 0.0031308 + i·Δx`)
+fn srgb8_curve_sample(value: f64) -> f64 {
+    static LUT: std::sync::OnceLock<Box<[f64; SRGB_CURVE_SAMPLES]>> = std::sync::OnceLock::new();
+    let table = LUT.get_or_init(|| {
+        let mut table: Box<[f64; SRGB_CURVE_SAMPLES]> = Box::new([0.0; SRGB_CURVE_SAMPLES]);
+        let x_begin = 0.003_130_8_f64;
+        let span = 1.0 - x_begin;
+        for (i, slot) in table.iter_mut().enumerate() {
+            let x = x_begin + span * (i as f64) / ((SRGB_CURVE_SAMPLES - 1) as f64);
+            *slot = 1.055 * x.powf(1.0 / 2.4) - 0.055;
+        }
+        table
+    });
+    let x_begin = 0.003_130_8_f64;
+    let span = 1.0 - x_begin;
+    let position = (value - x_begin) / span * ((SRGB_CURVE_SAMPLES - 1) as f64);
+    let index = (position as usize).min(SRGB_CURVE_SAMPLES - 2);
+    let frac = position - index as f64;
+    let lower = table[index];
+    let upper = table[index + 1];
+    lower + (upper - lower) * frac
 }
 
 /// 線形 RGB → CIEXYZ(sRGB の D65 プライマリに対する標準変換行列)
@@ -93,7 +128,47 @@ pub fn lab_to_srgb8(l: f64, a: f64, b: f64) -> [u8; 3] {
 pub fn linear_rgb_to_lstar(r: f64, g: f64, b: f64) -> f64 {
     let y =
         0.212_639_005_871_510_36 * r + 0.715_168_678_767_755_9 * g + 0.072_192_315_360_733_71 * b;
-    xyz_to_lab(D65_X * y, y, D65_Z * y)[0]
+    lstar_from_y_over_yn(y)
+}
+
+/// L*(Y/Yn) の CIE 曲線部(t > (6/29)³ → t^(1/3)、それ以下は線形補間)。
+///
+/// − 12MP ブロック特徴量は全ピクセル(1,200 万回)で cbrt を呼ぶため、
+///   前計算表(4,096 分割 + 線形補間)で置き換える(P1 目標: handoff/05 §7)。
+/// − 決定性: 補間誤差は L* 換算で 0.01 未満(f32 格納値の精度未満)。
+const LSTAR_SHAPE_SAMPLES: usize = 4096;
+
+fn lstar_from_y_over_yn(y_over_yn: f64) -> f64 {
+    // CIE L*: L = 116 × f(Y/Yn) − 16
+    const C3: f64 = (6.0 / 29.0) * (6.0 / 29.0) * (6.0 / 29.0);
+    if y_over_yn <= C3 {
+        // 線形領域(低輝度)は厳密式そのまま(cbrt 不要の軽量パス)
+        let f = (1.0 / 3.0) * (29.0 / 6.0) * (29.0 / 6.0) * y_over_yn + 4.0 / 29.0;
+        116.0 * f - 16.0
+    } else {
+        let t = y_over_yn.min(1.0);
+        static LUT: std::sync::OnceLock<Box<[f64; LSTAR_SHAPE_SAMPLES]>> =
+            std::sync::OnceLock::new();
+        let table = LUT.get_or_init(|| {
+            let mut table: Box<[f64; LSTAR_SHAPE_SAMPLES]> = Box::new([0.0; LSTAR_SHAPE_SAMPLES]);
+            let t_begin = C3;
+            let span = 1.0 - t_begin;
+            for (i, slot) in table.iter_mut().enumerate() {
+                let x = t_begin + span * (i as f64) / ((LSTAR_SHAPE_SAMPLES - 1) as f64);
+                *slot = x.cbrt();
+            }
+            table
+        });
+        let t_begin = C3;
+        let span = 1.0 - t_begin;
+        let position = (t - t_begin) / span * ((LSTAR_SHAPE_SAMPLES - 1) as f64);
+        let index = (position as usize).min(LSTAR_SHAPE_SAMPLES - 2);
+        let frac = position - index as f64;
+        let lower = table[index];
+        let upper = table[index + 1];
+        let f = lower + (upper - lower) * frac;
+        116.0 * f - 16.0
+    }
 }
 
 /// sRGB → 線形 RGB の 256 値ルックアップテーブル(計算量削減用)。
@@ -197,6 +272,7 @@ mod tests {
     #[test]
     fn lstar_matches_full_lab_path() {
         // 線形 RGB → L* の軽量経路は XYZ 経由の L* と一致する
+        // (cbrt の前計算・補間を導入した M7 でも、許容誤差内で一致する)
         for (r, g, b) in [(0.0_f64, 0.0, 0.0), (1.0, 1.0, 1.0), (0.3, 0.6, 0.9)] {
             let via_xyz = xyz_to_lab(
                 linear_rgb_to_xyz(r, g, b)[0],
@@ -204,7 +280,7 @@ mod tests {
                 linear_rgb_to_xyz(r, g, b)[2],
             )[0];
             let direct = linear_rgb_to_lstar(r, g, b);
-            assert!(close(via_xyz, direct, 1e-9));
+            assert!(close(via_xyz, direct, 0.01));
         }
     }
 
@@ -217,5 +293,36 @@ mod tests {
         // 範囲外はクランプされる
         assert_eq!(linear_to_srgb8(-0.5), 0);
         assert_eq!(linear_to_srgb8(1.5), 255);
+    }
+
+    #[test]
+    fn linear_to_srgb8_matches_exact_formula() {
+        // 前計算 + 線形補間 (M7) が厳密式(powf)と 8bit に丸めた値として
+        // 同一になること。u8 の全 256 値と、幾つかの中間点も照合する
+        for b in 0..=255_u8 {
+            let linear = srgb8_to_linear(b);
+            let exact = {
+                let c = if linear <= 0.003_130_8 {
+                    linear * 12.92
+                } else {
+                    1.055 * linear.powf(1.0 / 2.4) - 0.055
+                };
+                (c.clamp(0.0, 1.0) * 255.0).round() as u8
+            };
+            assert_eq!(linear_to_srgb8(linear), b, "u8 {b} roundtrip");
+            assert_eq!(linear_to_srgb8(linear), exact, "u8 {b} matches exact");
+        }
+        // 中間点(バイリニア補間が作る任意の線形値)も照合する
+        for i in 0..1000_usize {
+            let linear = (i as f64) / 1000.0 + (i as f64) * 0.000_37;
+            let mut exact_c = linear.clamp(0.0, 1.0);
+            if exact_c > 0.003_130_8 {
+                exact_c = (1.055 * exact_c.powf(1.0 / 2.4) - 0.055).clamp(0.0, 1.0);
+            } else {
+                exact_c *= 12.92;
+            }
+            let exact_b = (exact_c * 255.0).round() as u8;
+            assert_eq!(linear_to_srgb8(linear), exact_b, "mid {i}");
+        }
     }
 }

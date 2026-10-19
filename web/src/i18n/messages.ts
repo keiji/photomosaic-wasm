@@ -10,6 +10,8 @@ export const messages = {
 
   // S1 開始画面
   mainDropHint: 'クリックまたはここにドロップ(メイン画像を 1 枚)',
+  mainShrunkNotice: (edge: number): string =>
+    `画像が大きいため、長辺 ${edge.toLocaleString('ja-JP')} px に縮小して読み込みました(出力も縮小後の解像度になります)`,
   tileHeading: '構成画像(タイル)',
   tileDropHint: '追加した画像がここにドロップできます(複数可)',
   tilesReadyHint: 'メイン画像を選択してください',

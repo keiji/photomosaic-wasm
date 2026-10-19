@@ -625,4 +625,75 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       expect(() => wasm.begin_run()).toThrow(/tile pool is empty/);
     });
   });
+
+  describe('メトリクス(M7: getMetrics・計測の常時化)', () => {
+    afterEach(() => {
+      wasm.clear_tiles();
+      wasm.clear_main_image();
+    });
+
+    it('run の完了後、フェーズ別の所要・スパン・メモリを JSON で返す', () => {
+      const main = new Uint8Array(48 * 24 * 4);
+      wasm.set_main_image(main, 48, 24);
+      const mk = (value: number): Uint8Array => {
+        const d = new Uint8Array(32 * 32 * 4);
+        for (let o = 0; o < d.length; o += 4) {
+          d[o] = value;
+          d[o + 1] = value;
+          d[o + 2] = value;
+          d[o + 3] = 255;
+        }
+        return d;
+      };
+      wasm.add_tile(1n, mk(200), new Uint8Array(64 * 64 * 4), 64, 64);
+      wasm.run();
+
+      const metrics = JSON.parse(wasm.get_metrics()) as {
+        core_version: string;
+        runs: Array<{
+          run_id: number;
+          trigger: string;
+          started_at_ms: number;
+          phases: Record<string, { ms: number; tiles?: number; batches?: number }>;
+          spans: Record<string, { count: number; avg_ms: number; max_ms: number }>;
+          memory: { tiles_bytes: number };
+          config: { block_size: number };
+        }>;
+      };
+      expect(metrics.core_version).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(metrics.runs.length).toBeGreaterThan(0);
+      const run = metrics.runs[metrics.runs.length - 1];
+      if (!run || !run.phases) return;
+      const phases = run.phases;
+      expect(run.trigger).toBe('tile_added');
+      // フェーズ欄(handoff/05 §4 スキーマ)
+      expect(phases.P1_MAIN_ANALYZE?.ms).toBeGreaterThanOrEqual(0);
+      expect(phases.P2_TILE_ANALYZE?.tiles).toBe(1);
+      expect(phases.P3_MATCH?.batches).toBeGreaterThan(0);
+      expect(phases.P4_COMPOSE?.batches).toBeGreaterThan(0);
+      // スパン欄(バッチ境界の計測点)
+      const matchBatch = run.spans.p3_match_batch;
+      if (matchBatch) {
+        expect(matchBatch.count).toBeGreaterThan(0);
+        expect(matchBatch.max_ms).toBeGreaterThanOrEqual(0);
+      }
+      // メモリ欄(合成サムネイル 64×64 × 1 枚)
+      expect(run.memory.tiles_bytes).toBe(64 * 64 * 4);
+      expect(run.config.block_size).toBe(24);
+    });
+
+    it('get_metrics は JSON として常にパースできる(共有モジュール内の履歴を含む)', () => {
+      // 同一 wasm モジュールはテスト群で共有されるため、履歴に既存 run が
+      // 入りうる。スキーマ構造(JSON 正常解析・必須欄)の成立のみを確認する
+      const metrics = JSON.parse(wasm.get_metrics()) as {
+        core_version: string;
+        runs: Array<{ run_id: number; trigger: string }>;
+      };
+      expect(Array.isArray(metrics.runs)).toBe(true);
+      for (const run of metrics.runs) {
+        expect(run.run_id).toBeGreaterThan(0);
+        expect(run.trigger.length).toBeGreaterThan(0);
+      }
+    });
+  });
 });

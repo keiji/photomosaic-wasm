@@ -67,6 +67,8 @@ export interface LoadedImage {
   width: number;
   height: number;
   data: Uint8ClampedArray<ArrayBuffer>;
+  /** 入力が長辺上限を超えていたため縮小したか(案内文言で使用: M7) */
+  scaled?: boolean;
 }
 
 /**
@@ -107,6 +109,7 @@ export async function loadMainImage(file: File): Promise<LoadedImage> {
       width: target.width,
       height: target.height,
       data: imageData.data,
+      scaled: target.scaled,
     };
   } finally {
     bitmap.close();

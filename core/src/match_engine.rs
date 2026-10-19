@@ -139,17 +139,23 @@ pub fn match_unmatched_range(
         // 各タイルの距離を評価し最小を選ぶ(ID 昇順走査 → 決定的)。
         // あわせて「視覚上同一(ΔE76 < identical_de)」の候補の中で detail 最大の
         // タイルを追跡し、存在すれば距離最小より優先して選ぶ。
-        // TileFeature は Copy のため値で保持し、プールの可変借用と衝突させない
+        // TileFeature は Copy のため値で保持し、プールの可変借用と衝突させない。
+        // 大量タイル(M7)では総当たりの代わりに k-d 木の近傍上位 32 件を候補と
+        // する(usage・隣接ペナルティは候補取得後の再評価で反映する)
+        let mut candidate_ids = pool.candidates_for(block, config);
+        if candidate_ids.is_empty() {
+            candidate_ids = pool.features().map(|f| f.id).collect();
+        }
         let mut best: Option<(f32, TileFeature)> = None;
         let mut near_best: Option<(f32, TileFeature)> = None;
 
-        for tile in pool.features() {
+        for tile in pool.features_for(&candidate_ids) {
             let de = delta_e76(&block.mean_lab, &tile.mean_lab);
             let neighbor_same = left_id == Some(tile.id) || above_id == Some(tile.id);
-            let d = distance(block, tile, tile.usage, neighbor_same, config);
+            let d = distance(block, &tile, tile.usage, neighbor_same, config);
 
             if best.is_none_or(|(best_d, _)| d < best_d) {
-                best = Some((d, *tile));
+                best = Some((d, tile));
             }
             if de < config.identical_de {
                 // detail 同点のときは距離(usage/隣接ペナルティ含む)で比較する。
@@ -162,7 +168,7 @@ pub fn match_unmatched_range(
                     }
                 };
                 if take_near {
-                    near_best = Some((d, *tile));
+                    near_best = Some((d, tile));
                 }
             }
         }
@@ -229,11 +235,21 @@ pub fn evaluate_swap_range(
 
         // 全タイル(ID 昇順走査)の距離を再評価し最小を選ぶ。
         // 差し替え評価は improve_margin による純粋な距離比較のみを行う
-        // (identical_de による detail 優先は初回マッチの規則)
+        // (identical_de による detail 優先は初回マッチの規則)。
+        // 大量タイル(M7)では k-d 木候補 + 現割当タイルを評価対象とする
+        let mut candidate_ids = pool.candidates_for(block, config);
+        if candidate_ids.is_empty() {
+            candidate_ids = pool.features().map(|f| f.id).collect();
+        } else if !candidate_ids.contains(&current_id) {
+            // 差し替え評価の基準となる現割当が候補外に漏れると
+            // 改善判定が実際より良くなる(現割当が評価対象外に漏れる)ため必ず含める
+            candidate_ids.push(current_id);
+            candidate_ids.sort_unstable();
+        }
         let mut best: Option<(f32, u64)> = None;
-        for tile in pool.features() {
+        for tile in pool.features_for(&candidate_ids) {
             let neighbor_same = left_id == Some(tile.id) || above_id == Some(tile.id);
-            let d = distance(block, tile, tile.usage, neighbor_same, config);
+            let d = distance(block, &tile, tile.usage, neighbor_same, config);
             if best.is_none_or(|(best_d, _)| d < best_d) {
                 best = Some((d, tile.id));
             }
@@ -689,6 +705,40 @@ mod tests {
         assert!(swapped.is_empty(), "None block must be skipped");
         assert_eq!(assigned[0], None);
         assert_eq!(assigned[1], Some(1));
+    }
+
+    #[test]
+    fn kd_tree_candidates_below_query_k_match_brute_force() {
+        // M7: 閾値をテスト用に下げて k-d 木経路を強制し、総当たりと同一結果に
+        // なることを確認する(候補数 4 ≤ k=32 なので近似誤差はない)
+        let target: [f32; 3] = [50.0, 0.5, -0.5];
+        let tiles = [
+            ([50.5, 0.0, 0.0], 1.0, 1),
+            ([50.0, 1.0, -1.0], 0.5, 2),
+            ([51.5, -2.0, 2.0], 2.0, 3),
+            ([48.0, 3.0, 3.0], 0.0, 4),
+        ];
+        let blocks = uniform_blocks(target, 2.0, 8);
+        let config = MosaicConfig::default();
+
+        let brute = {
+            let mut pool = pool_with_tiles(&tiles);
+            assert!(!pool.uses_kd_index());
+            match_blocks(&blocks, 4, &mut pool, &config)
+        };
+        let via_kd = {
+            let mut pool = pool_with_tiles(&tiles);
+            pool.set_kd_threshold_for_test(2);
+            assert!(pool.uses_kd_index());
+            let results = match_blocks(&blocks, 4, &mut pool, &config);
+            // 構築統計が記録されている(p2_index_build スパンの計測点)
+            assert!(pool.index_build_stats().count >= 1);
+            results
+        };
+        assert_eq!(
+            brute, via_kd,
+            "k-d candidates must not change results when k >= tile count"
+        );
     }
 
     #[test]

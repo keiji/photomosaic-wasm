@@ -10,6 +10,7 @@
 import type {
   CoreBridge,
   GridInfo,
+  MetricsRun,
   MosaicConfig,
   ProgressCallback,
   ProgressEvent,
@@ -282,6 +283,10 @@ export function createMockCore(): CoreBridge {
       return { ...config };
     },
 
+    async getMetrics(): Promise<MetricsRun[]> {
+      // モックには計測概念がないため空履歴を返す(オーバーレイは非表示のまま)
+      return [];
+    },
     async setConfig(next: MosaicConfig): Promise<void> {
       config = { ...next };
     },

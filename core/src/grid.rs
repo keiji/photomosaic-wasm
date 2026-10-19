@@ -265,7 +265,7 @@ mod tests {
         // ゴールデンハッシュ
         assert_eq!(
             fnv1a64(&feature_bytes(&features)),
-            0x1CDC_47E8_B287_E331,
+            0xD027_84BB_9D42_B8D4, // M7: L* 前計算(4,096 分割)の導入で f32 格納値が丸め境界で変化
             "golden hash mismatch: inspect intentional spec changes and update this value"
         );
     }

@@ -9,11 +9,85 @@ use photomosaic_core::config::MosaicConfig;
 use photomosaic_core::grid::{
     compute_block_features, compute_grid_info, BlockFeature, GridInfo, DEFAULT_BLOCK_SIZE,
 };
+use photomosaic_core::metrics::{self, PendingP1P2, RunRecord, SpanAgg};
 use photomosaic_core::pipeline::{self, MatchMode};
 use photomosaic_core::progress::ProgressEvent;
 use photomosaic_core::tile::{TileFeature, TilePool};
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
+
+/// コアのスパン計測にホスト時計を注入する(M7: handoff/05 §2)。
+///
+/// `globalThis.performance.now()`(単調)を用い、無ければ `Date.now()`
+/// (サンドボックス環境のフォールバック)。コア内部は時計を持たない
+fn install_panic_hook() {
+    // パニックの可視化(開発補助): コンソールへ panic メッセージを出す
+    std::panic::set_hook(Box::new(|info| {
+        let console = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("console"));
+        let console = console.ok().filter(|c| c.is_object());
+        if let Some(console) = console {
+            let error = js_sys::Reflect::get(&console, &JsValue::from_str("error"));
+            if let Ok(error) = error {
+                if error.is_function() {
+                    let f: js_sys::Function = error.dyn_into().expect("checked is_function");
+                    let _ = f.call1(&console, &JsValue::from_str(&format!("{info}")));
+                }
+            }
+        }
+    }));
+}
+
+#[wasm_bindgen(start)]
+pub fn boot() {
+    install_panic_hook();
+    metrics::install_clock(Box::new(|| {
+        let global = js_sys::global();
+        let performance = js_sys::Reflect::get(&global, &JsValue::from_str("performance"));
+        let now_fn = performance.and_then(|performance| {
+            if !performance.is_object() {
+                return Err(JsValue::from_str("no performance"));
+            }
+            let result = js_sys::Reflect::get(&performance, &JsValue::from_str("now"));
+            if let Ok(now) = result {
+                if now.is_function() {
+                    let now: js_sys::Function = now.dyn_into().expect("checked is_function");
+                    let ms = now.call0(&performance);
+                    if let Ok(ms) = ms
+                        .and_then(|ms| ms.as_f64().ok_or_else(|| JsValue::from_str("not a number")))
+                    {
+                        return Ok(ms);
+                    }
+                }
+            }
+            Err(JsValue::from_str("no performance.now"))
+        });
+        now_fn.ok().unwrap_or_else(js_sys::Date::now)
+    }));
+}
+
+/// P1/P2 の蓄積と run レコードの進行情報(M7 計測の常時化)。
+///
+/// - `pending`: 最後の run 完了以降の P1 グリッド・特徴量と P2 タイル解析の蓄積
+/// - `trigger`: 直近の状態変更(main 設定・ブロックサイズ変更・タイル追加/削除)。
+///   次の begin_run / begin_rematch の trigger になり、採番後は消費する
+struct MetricsSession {
+    pending: PendingP1P2,
+    /// 直近の状態変更の種別(次の run の trigger)
+    trigger: Option<&'static str>,
+    /// 実行中の run レコード(begin 時に作成、完了時に P3/P4 へ埋めて推送)
+    active_record: Option<RunRecord>,
+}
+
+impl MetricsSession {
+    /// 既定の進行情報(蓄積は発生時に埋まる)
+    fn new() -> Self {
+        MetricsSession {
+            pending: PendingP1P2::default(),
+            trigger: None,
+            active_record: None,
+        }
+    }
+}
 
 /// コア内に保持するメイン画像の状態(詳細設計書 9 章のメモリ設計に基づき、
 /// 解析・出力用の RGBA をコア内に保持する。exportImage で 1 回だけ取り出す)。
@@ -41,6 +115,9 @@ thread_local! {
 
     /// マッチング・合成のパラメータ(詳細設計書 5 章。setConfig で上書き)
     static CONFIG: RefCell<MosaicConfig> = RefCell::new(MosaicConfig::default());
+
+    /// メトリクスの進行情報(M7: 計測の常時化。handoff/05 §2)
+    static METRICS_SESSION: RefCell<MetricsSession> = RefCell::new(MetricsSession::new());
 }
 
 /// JS 例外(Error インスタンス)を生成する。
@@ -53,6 +130,105 @@ fn js_error(message: &str) -> JsValue {
 /// u32 → usize の変換(wasm32 でも 4 GB 未満の寸法を安全に扱う)
 fn to_usize(value: u32) -> usize {
     usize::try_from(value).expect("value fits usize")
+}
+
+// --- メトリクスの結線(M7: handoff/05 性能の計測設計) ---
+
+/// P1 のスパンを蓄積する(span_id は metrics.rs の定数: handoff/05 §3)
+fn record_p1_span(span_id: &'static str, ms: f64) {
+    METRICS_SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        if span_id == metrics::SPAN_P1_GRID {
+            session.pending.p1_grid_ms += ms;
+        } else if span_id == metrics::SPAN_P1_BLOCK_FEATURES {
+            session.pending.p1_block_features_ms += ms;
+        }
+    });
+}
+
+/// P2 のスパン(タイル 1 枚の解析)を蓄積する
+fn record_p2_tile_span(ms: f64) {
+    METRICS_SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        session.pending.p2_tile_analyze.record(ms);
+        session.pending.p2_tile_count += 1;
+    });
+}
+
+/// 直近の状態変更を trigger として記録する(次の run で採用・消費)
+fn mark_trigger(trigger: &'static str) {
+    METRICS_SESSION.with(|session| {
+        session.borrow_mut().trigger = Some(trigger);
+    });
+}
+
+/// run の開始をメトリクスへ記録する(P1/P2 の蓄積を引き取ったうえで新規レコード)
+fn begin_run_record(block_size_px: u32, config: &MosaicConfig, tiles_bytes: u64) {
+    METRICS_SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let trigger = session.trigger.take();
+        let pending = session.pending;
+        session.pending = PendingP1P2::default();
+        let record = RunRecord {
+            run_id: metrics::allocate_run_id(),
+            trigger: match trigger {
+                Some(value) => value.to_owned(),
+                None => "rematch".to_owned(),
+            },
+            started_at_ms: metrics::now_ms(),
+            p1_grid_ms: pending.p1_grid_ms,
+            p1_block_features_ms: pending.p1_block_features_ms,
+            p2_tile_analyze_ms: pending.p2_tile_analyze.total_ms,
+            p2_tile_max_ms: pending.p2_tile_analyze.max_ms,
+            p2_tile_avg_ms: pending.p2_tile_analyze.avg_ms(),
+            p2_tiles: pending.p2_tile_count,
+            p2_index_build: SpanAgg::default(),
+            p3_match_batch: SpanAgg::default(),
+            p3_match_total_ms: 0.0,
+            p4_compose_batch: SpanAgg::default(),
+            p4_compose_total_ms: 0.0,
+            tiles_bytes,
+            block_size_px,
+            w_c: config.w_c,
+            w_d: config.w_d,
+            usage_penalty: config.usage_penalty,
+            neighbor_penalty: config.neighbor_penalty,
+            color_correct: config.color_correct,
+            row_batch: config.row_batch,
+        };
+        session.active_record = Some(record);
+    });
+}
+
+/// run の完了(またはキャンセル)でメトリクスに確定値を推送する。
+///
+/// - `spans`: パイプラインの実測(P3/P4 バッチ所要)
+/// - k-d 木構築はセッション累積(構築は変更時にのみ発生するため)
+fn finish_run_record(spans: pipeline::RunSpans) {
+    let pool_stats = TILE_POOL.with(|cell| cell.borrow().index_build_stats());
+    let tiles_bytes = TILE_POOL.with(|cell| cell.borrow().total_compose_bytes());
+    METRICS_SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        if let Some(mut record) = session.active_record.take() {
+            record.p3_match_batch = spans.p3_match_batch;
+            record.p3_match_total_ms = spans.p3_match_batch.total_ms;
+            record.p4_compose_batch = spans.p4_compose_batch;
+            record.p4_compose_total_ms = spans.p4_compose_batch.total_ms;
+            record.p2_index_build = pool_stats;
+            record.tiles_bytes = tiles_bytes;
+            metrics::push_run_record(record);
+        }
+    });
+}
+
+/// メトリクス JSON を返す(M7: handoff/05 §4 getMetrics() の出力)。
+///
+/// 直近 16 run の分(run_id・trigger・フェーズ所要・バッチスパン・メモリ・
+/// 設定スナップショット)。UI オーバーレイやベンチでの記録に使用する。
+/// 時計が流せる環境では時間値が実測される(コアは時計を持たない)
+#[wasm_bindgen]
+pub fn get_metrics() -> String {
+    metrics::export_json()
 }
 
 /// コアバージョン(Web と Android で同一の .wasm を使うための整合確認用)
@@ -140,8 +316,16 @@ pub fn set_main_image(rgba: Vec<u8>, width: u32, height: u32) -> Result<JsGridIn
         return Err(js_error("rgba buffer length mismatch"));
     }
 
+    // P1 のスパン計測(M7: handoff/05 §3 p1_grid / p1_block_features)
+    let t0 = metrics::now_ms();
     let grid = compute_grid_info(width, height, DEFAULT_BLOCK_SIZE);
+    let grid_ms = metrics::now_ms() - t0;
+    let t1 = metrics::now_ms();
     let features = compute_block_features(&rgba, width, height, DEFAULT_BLOCK_SIZE);
+    let features_ms = metrics::now_ms() - t1;
+    record_p1_span(metrics::SPAN_P1_GRID, grid_ms);
+    record_p1_span(metrics::SPAN_P1_BLOCK_FEATURES, features_ms);
+    mark_trigger("initial");
 
     MAIN_IMAGE.with(|cell| {
         *cell.borrow_mut() = Some(MainImageState {
@@ -175,8 +359,16 @@ pub fn set_block_size(px: u32) -> Result<JsGridInfo, JsValue> {
         };
         let width = main.grid.width;
         let height = main.grid.height;
+        // P1 再計算のスパン計測(M7)
+        let t0 = metrics::now_ms();
         main.grid = compute_grid_info(width, height, px);
+        let grid_ms = metrics::now_ms() - t0;
+        let t1 = metrics::now_ms();
         main.features = compute_block_features(&main.rgba, width, height, px);
+        let features_ms = metrics::now_ms() - t1;
+        record_p1_span(metrics::SPAN_P1_GRID, grid_ms);
+        record_p1_span(metrics::SPAN_P1_BLOCK_FEATURES, features_ms);
+        mark_trigger("block_size_change");
         // ブロックサイズ変更でグリッドが変わるため、既存の割当表・合成結果は
         // 無効化する(全ブロックが未確定。生成は再度 run で行う)
         main.assigned = Vec::new();
@@ -263,6 +455,10 @@ pub fn begin_run() -> Result<(), JsValue> {
                 &main.features,
                 &main.rgba,
             ));
+            // メトリクス: run レコードの開始を記録する(M7: handoff/05 §4)
+            let config = CONFIG.with(|config| *config.borrow());
+            let tiles_bytes = TILE_POOL.with(|pool| pool.borrow().total_compose_bytes());
+            begin_run_record(main.grid.block_size, &config, tiles_bytes);
         }
     });
     Ok(())
@@ -346,6 +542,10 @@ pub fn begin_rematch() -> Result<(), JsValue> {
             &seed,
             mode,
         ));
+        // メトリクス: run レコードの開始を記録する(M7)
+        let config = CONFIG.with(|config| *config.borrow());
+        let tiles_bytes = TILE_POOL.with(|pool| pool.borrow().total_compose_bytes());
+        begin_run_record(main.grid.block_size, &config, tiles_bytes);
         Ok(())
     })
 }
@@ -362,7 +562,8 @@ pub fn begin_rematch() -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub fn step_run(now_ms: Option<f64>) -> Result<JsStepOutput, JsValue> {
     let config = CONFIG.with(|cell| *cell.borrow());
-    TILE_POOL.with(|pool_cell| {
+    let mut finished_spans: Option<pipeline::RunSpans> = None;
+    let output = TILE_POOL.with(|pool_cell| -> Result<JsStepOutput, JsValue> {
         let mut pool = pool_cell.borrow_mut();
         MAIN_IMAGE.with(|image_cell| {
             let mut state = image_cell.borrow_mut();
@@ -388,6 +589,9 @@ pub fn step_run(now_ms: Option<f64>) -> Result<JsStepOutput, JsValue> {
                 // 使用回数を現割当表から再集計する(4.4: 差分再マッチ後に
                 // ペナルティの連続性を保つ。フルランでは再計上で同一値)
                 pool.recount_usage(&main.assigned);
+                // メトリクス用のスパンを取り出す(M7)。
+                // push は borrow を解放した後に行う(TILE_POOL の二重借用防止)
+                finished_spans = Some(run.take_spans());
                 main.run = None;
             }
             Ok(JsStepOutput {
@@ -397,7 +601,11 @@ pub fn step_run(now_ms: Option<f64>) -> Result<JsStepOutput, JsValue> {
                 result,
             })
         })
-    })
+    })?;
+    if let Some(spans) = finished_spans {
+        finish_run_record(spans);
+    }
+    Ok(output)
 }
 
 /// フォトモザイクの実行をキャンセルする(詳細設計書 7.5)。
@@ -419,6 +627,8 @@ pub fn cancel() {
                 // 続行する。キャンセル分の使用回数も現割当表から再集計する)
                 main.assigned = run.take_assignments();
                 TILE_POOL.with(|pool| pool.borrow_mut().recount_usage(&main.assigned));
+                // メトリクス: キャンセル時点までのスパンを推送する(M7)
+                finish_run_record(run.take_spans());
             }
         }
     });
@@ -753,6 +963,7 @@ pub fn add_tile(
     compose_w: u32,
     compose_h: u32,
 ) -> Result<JsTileInfo, JsValue> {
+    let t0 = metrics::now_ms();
     TILE_POOL.with(|cell| {
         let mut pool = cell.borrow_mut();
         let info = pool
@@ -765,6 +976,9 @@ pub fn add_tile(
                 main.tiles_added_since_match = true;
             }
         });
+        // P2(タイル 1 枚)の解析スパン(M7)+ 生成トリガーの登録
+        record_p2_tile_span(metrics::now_ms() - t0);
+        mark_trigger("tile_added");
         Ok(info)
     })
 }
@@ -790,6 +1004,7 @@ pub fn remove_tile(id: u64) -> Result<(), JsValue> {
             }
         }
     });
+    mark_trigger("tile_removed");
     Ok(())
 }
 

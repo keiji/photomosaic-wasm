@@ -303,6 +303,52 @@ async function createWasmCore(): Promise<CoreBridge> {
       return { width: lastGrid.width, height: lastGrid.height, data };
     },
 
+    async getMetrics(): Promise<import('./types').MetricsRun[]> {
+      // コアの計測 JSON(M7: handoff/05 §4)を UI 型へ写す。
+      // 生 JSON(snake_case)のフィールドを UI 型(camelCase)へ nil-safe に写像する
+      const raw = JSON.parse(wasm.get_metrics()) as Record<string, unknown>;
+      const runs = Array.isArray(raw.runs) ? raw.runs : [];
+      const mapped: import('./types').MetricsRun[] = [];
+      for (const item of runs) {
+        const r = item as Record<string, unknown>;
+        const phases = r.phases as import('./types').MetricsRun['phases'] | undefined;
+        const spans = r.spans as Record<string, { count: number; avg_ms: number; max_ms: number }>;
+        const memory = (r.memory ?? {}) as { wasm_heap_bytes?: number; tiles_bytes?: number };
+        const config = (r.config ?? {}) as Record<string, number>;
+        mapped.push({
+          runId: Number(r.run_id ?? 0),
+          trigger: String(r.trigger ?? ''),
+          startedAtMs: Number(r.started_at_ms ?? 0),
+          phases: phases ?? {
+            P1_MAIN_ANALYZE: { ms: 0 },
+            P2_TILE_ANALYZE: { ms: 0, tiles: 0 },
+            P3_MATCH: { ms: 0, batches: 0 },
+            P4_COMPOSE: { ms: 0, batches: 0 },
+          },
+          spans: {
+            p1_grid: castSpan(spans?.p1_grid),
+            p1_block_features: castSpan(spans?.p1_block_features),
+            p2_tile_analyze: castSpan(spans?.p2_tile_analyze),
+            p2_index_build: castSpan(spans?.p2_index_build),
+            p3_match_batch: castSpan(spans?.p3_match_batch),
+            p4_compose_batch: castSpan(spans?.p4_compose_batch),
+          },
+          memory: {
+            wasmHeapBytes: memory.wasm_heap_bytes ?? 0,
+            tilesBytes: memory.tiles_bytes ?? 0,
+          },
+          config: {
+            block_size: config.block_size ?? 0,
+            w_c: config.w_c ?? 0,
+            w_d: config.w_d ?? 0,
+            alpha: config.alpha ?? 0,
+            row_batch: config.row_batch ?? 0,
+          },
+        });
+      }
+      return mapped;
+    },
+
     onProgress(callback: ProgressCallback): void {
       progressListeners.add(callback);
     },
@@ -336,4 +382,15 @@ export async function createCoreBridge(): Promise<CoreBridge> {
       });
   }
   return wasmInit;
+}
+
+/** コアの JSON スパン欄(snake_case)を TS 型(camelCase)へ写す。
+ * 値が存在しない環境では undefined を許容する */
+function castSpan(
+  raw: { count: number; avg_ms: number; max_ms: number } | undefined,
+): import('./types').MetricsSpan | undefined {
+  if (!raw || typeof raw.count !== 'number') {
+    return undefined;
+  }
+  return { count: raw.count, avgMs: raw.avg_ms, maxMs: raw.max_ms };
 }

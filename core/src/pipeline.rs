@@ -19,6 +19,7 @@ use crate::grid::{BlockFeature, GridInfo};
 use crate::match_engine::{
     assignments_to_matches, evaluate_swap_range, match_unmatched_range, MatchResult,
 };
+use crate::metrics::SpanAgg;
 use crate::progress::{Phase, PhasePlan, ProgressEvent, ProgressThrottle};
 use crate::tile::TilePool;
 
@@ -48,6 +49,22 @@ pub struct ResultBatch {
     /// `width * (row_end - row_begin) * block_size * 4` バイトの
     /// 合成済み RGBA(下端の半端ブロック行は画像端でクリップ)
     pub rgba: Vec<u8>,
+}
+
+/// run 内のスパン計測結果(完了・キャンセル時にホストが取り出す。M7)
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RunSpans {
+    /// P3 マッチングの行バッチ所要 (累計・回数・最大 = handoff/05 §3)
+    pub p3_match_batch: SpanAgg,
+    /// P4 合成の行バッチ所要
+    pub p4_compose_batch: SpanAgg,
+}
+
+impl RunSpans {
+    /// done 時にホストへ渡すため取り出す(以降の値は 0)
+    pub fn take(&mut self) -> RunSpans {
+        std::mem::take(self)
+    }
 }
 
 /// `BatchRunState::step()` 1 バッチ分の結果(onProgress / onResult 相当)
@@ -126,6 +143,8 @@ pub struct BatchRunState {
     throttle: ProgressThrottle,
     /// 合成結果バッファ(シードで初期化。完成時 / キャンセル時に取り出す)
     out: Vec<u8>,
+    /// バッチ境界のスパン計測(M7: handoff/05 §3。フェーズ境界・バッチ境界のみ)
+    spans: RunSpans,
     canceled: bool,
     done: bool,
 }
@@ -204,6 +223,7 @@ impl BatchRunState {
             plan: PhasePlan::new(vec![Phase::Match, Phase::Compose]),
             throttle: ProgressThrottle::new(),
             out: seed_rgba.to_vec(),
+            spans: RunSpans::default(),
             canceled: false,
             done: false,
         }
@@ -233,6 +253,12 @@ impl BatchRunState {
     /// 取り出し後は空になる。キャンセル時は確定済みの分のみが入る
     pub fn take_assignments(&mut self) -> Vec<Option<u64>> {
         std::mem::take(&mut self.assigned)
+    }
+
+    /// バッチスパンの実測結果を取り出す(M7: handoff/05 §3)。
+    /// 取り出し後は 0 クリアされる
+    pub fn take_spans(&mut self) -> RunSpans {
+        self.spans.take()
     }
 
     /// キャンセル要求の記録(詳細設計書 7.5)。
@@ -292,6 +318,7 @@ impl BatchRunState {
         let batch_blocks = to_usize(config.row_batch.max(1)) * to_usize(cols);
         let block_begin = self.match_next_block.min(total);
         let block_end = (block_begin + batch_blocks).min(total);
+        let span_start = crate::metrics::now_ms();
 
         match self.mode {
             MatchMode::Full | MatchMode::FillUnmatched => {
@@ -330,6 +357,10 @@ impl BatchRunState {
             }
         }
         self.match_next_block = block_end;
+        // P3 バッチの所要を累積する(M7: handoff/05 §3。時計なしは 0 で回数のみ)
+        self.spans
+            .p3_match_batch
+            .record(crate::metrics::now_ms() - span_start);
 
         // P3 の phase_ratio は「マッチ済みブロック数 / total_blocks」(詳細設計書 7.1)。
         // 差分再マッチでも assigned_blocks を全体ブロック数に対して計上する(4.4)
@@ -383,6 +414,7 @@ impl BatchRunState {
                 done: true,
             };
         };
+        let span_start = crate::metrics::now_ms();
         compose::compose_rows(
             &mut self.out,
             &self.grid,
@@ -393,6 +425,10 @@ impl BatchRunState {
             begin,
             end,
         );
+        // P4 バッチの所要を累積する(M7: 時計なしは 0 で回数のみ)
+        self.spans
+            .p4_compose_batch
+            .record(crate::metrics::now_ms() - span_start);
         self.composed_dirty_rows += end - begin;
 
         // 部分結果のスライスは画素行単位(1 ブロック行 = block_size 画素行)。
