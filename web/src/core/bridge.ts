@@ -30,6 +30,20 @@ export function getCoreImplementation(): CoreImplementation {
   return currentImplementation;
 }
 
+/** 行バッチ間のスケジューラ設定(Worker では setTimeout(0) を注入する) */
+export interface CoreSchedulerOptions {
+  scheduleNextBatch?: (callback: () => void) => void;
+}
+
+/** メインスレッド向けの既定スケジューラ(描画に合わせて次バッチを再開する) */
+function defaultScheduleNextBatch(callback: () => void): void {
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => callback());
+  } else {
+    setTimeout(callback, 16);
+  }
+}
+
 /** wasm-bindgen の JsGridInfo を型付き GridInfo へ写す(寿命管理のため free する) */
 function toGridInfo(info: {
   free(): void;
@@ -76,7 +90,8 @@ function toTileInfo(info: {
 }
 
 /** WASM 実装をロードして構築する(失敗時は例外を投げ、呼び出し側でモックへフォールバック) */
-async function createWasmCore(): Promise<CoreBridge> {
+export async function createWasmCore(options: CoreSchedulerOptions = {}): Promise<CoreBridge> {
+  const schedule = options.scheduleNextBatch ?? defaultScheduleNextBatch;
   const wasm = await import('../wasm/photomosaic_core_wasm.js');
   await wasm.default();
   // 初期化が済んだことを往復サンプルで確認する(handoff/02 検収基準)
@@ -106,19 +121,6 @@ async function createWasmCore(): Promise<CoreBridge> {
    * (詳細設計書 8.1)
    */
   let activeRun: { canceled: boolean } | null = null;
-
-  /**
-   * 行バッチ境界で UI に制御を返す。
-   * requestAnimationFrame がある環境では描画に合わせて次バッチを再開し、
-   * それ以外(非描画環境)では macrotask 次点で再開する(詳細設計書 8.1)
-   */
-  const scheduleNextBatch = (callback: () => void): void => {
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => callback());
-    } else {
-      setTimeout(callback, 16);
-    }
-  };
 
   /**
    * begin で開始した行バッチ駆動ループ(M5 run / M6 rematch の共通駆動)。
@@ -191,14 +193,15 @@ async function createWasmCore(): Promise<CoreBridge> {
           reject(err instanceof Error ? err : new Error(String(err)));
           return;
         }
-        // バッチ境界で JS へ制御を返す(詳細設計書 8.1)
-        scheduleNextBatch(drive);
+        // バッチ境界で制御を返す(メインスレッドでは rAF、Worker では setTimeout(0))
+        schedule(drive);
       };
       drive();
     });
   };
 
   return {
+    progressMode: 'determinate' as const,
     async getVersion(): Promise<string> {
       return wasm.get_version();
     },

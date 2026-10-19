@@ -47,9 +47,13 @@ jobs:
       - name: cargo test (core)
         run: cargo test --manifest-path core/Cargo.toml
 
-      - name: wasm-pack build
+      - name: Verify WASM optimization profile
+        # 速度優先の opt-level=3 を CI でも保証する
+        run: grep -q '^opt-level = 3' core-wasm/Cargo.toml
+
+      - name: wasm-pack build (opt-level=3)
         # RUSTFLAGS でパスを remap する(runner のパスを生成物に埋め込まない)ため、
-        # npm script 経由で実行する
+        # npm script 経由で実行する。Cargo.toml の opt-level=3 が適用される
         working-directory: web
         run: npm run wasm:build
 

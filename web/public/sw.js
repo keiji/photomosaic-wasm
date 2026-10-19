@@ -7,10 +7,10 @@
  *
  * 戦略: cache-first(ビルド成果物のファイル名にハッシュを含み、内容変更で
  * URL が変わるため、古いハッシュ asset のキャッシュは古いだけ)。
- * バイパス: 生成物以外のページ遷移(HTML は 1 枚)はネットワーク先行で
+ * バイパス: 生成物以外のページ遷移(HTML は 2 枚)はネットワーク先行で
  * 更新しつつ、取得できない場合にキャッシュへフォールバックする。
  */
-const CACHE_NAME = 'photomosaic-offline-v2';
+const CACHE_NAME = 'photomosaic-offline-v3';
 
 /** GitHub Pages のプロジェクトページ配下でも動くよう、scope 基準で解決する */
 const INDEX_PATH = new URL('index.html', self.registration.scope).pathname;
@@ -20,7 +20,7 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(['./', './index.html']))
+      .then((cache) => cache.addAll(['./', './index.html', './index_js.html']))
       .then(() => self.skipWaiting()),
   );
 });

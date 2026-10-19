@@ -18,6 +18,9 @@ export class ProgressPanel {
   private readonly barLabel: HTMLElement;
   private readonly phaseLabel: HTMLElement;
   private visible: boolean;
+  private indeterminate = false;
+  private assigned = 0;
+  private total = 0;
 
   constructor(root: HTMLElement) {
     this.section = root;
@@ -43,10 +46,35 @@ export class ProgressPanel {
 
   /** 割当済み/全体ブロック数とバーを更新する */
   setCounts(assigned: number, total: number): void {
-    const percent = total > 0 ? Math.floor((assigned / total) * 100) : 0;
-    this.barLabel.textContent = messages.progressBlocksLabel(assigned, total, percent);
-    this.barFill.style.width = `${percent}%`;
-    this.bar.setAttribute('aria-valuenow', String(percent));
+    this.assigned = assigned;
+    this.total = total;
+    if (!this.indeterminate) {
+      this.renderCounts();
+    }
+  }
+
+  /**
+   * 不定進捗の表示を切り替える。
+   * Worker 実行時はバッチ進捗を UI へ即時反映しないため、バーをアニメーション表示する。
+   * 解除時は保持している最新の割当数で確定進捗へ戻す。
+   */
+  setIndeterminate(active: boolean): void {
+    if (this.indeterminate === active) {
+      return;
+    }
+    this.indeterminate = active;
+    this.bar.classList.toggle('is-indeterminate', active);
+    if (active) {
+      this.barFill.style.width = '';
+      this.bar.removeAttribute('aria-valuenow');
+      this.bar.setAttribute('aria-busy', 'true');
+      this.bar.setAttribute('aria-valuetext', messages.progressIndeterminate);
+      this.barLabel.textContent = messages.progressIndeterminate;
+      return;
+    }
+    this.bar.removeAttribute('aria-busy');
+    this.bar.removeAttribute('aria-valuetext');
+    this.renderCounts();
   }
 
   /** フェーズ表示を更新する(コード → 文言化は本クラスで実施) */
@@ -58,6 +86,13 @@ export class ProgressPanel {
   reset(): void {
     this.setCounts(0, 0);
     this.setPhase(messages.phaseIdle);
+  }
+
+  private renderCounts(): void {
+    const percent = this.total > 0 ? Math.floor((this.assigned / this.total) * 100) : 0;
+    this.barLabel.textContent = messages.progressBlocksLabel(this.assigned, this.total, percent);
+    this.barFill.style.width = `${percent}%`;
+    this.bar.setAttribute('aria-valuenow', String(percent));
   }
 
   private setVisible(value: boolean): void {

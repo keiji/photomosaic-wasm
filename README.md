@@ -4,6 +4,7 @@
 
 - **共通コア**: Rust(WASM にコンパイル)。Web / Android で同一の .wasm を実行
 - **Web アプリ**: TypeScript + Vite(本リポジトリの `web/`)
+- **純 TypeScript 版**: 同一 UI・アルゴリズムを WASM なしで実行する比較用ページ(`index_js.html`)
 - **Android アプリ**: Kotlin + Jetpack Compose(M4 以降の着手。`androidx.javascriptengine` 上で同一の .wasm を実行)
 
 設計ドキュメントは [docs/README.md](./docs/README.md) を参照。
@@ -36,18 +37,27 @@ npm run dev
 1. S1(開始画面)でメイン画像をクリック/ドロップで設定
 2. S2(編集画面)でグリッド線 + ブロック平均色のプレビューを表示
 3. ブロックサイズスライダー(8〜128 px)でグリッドを再計算(300ms デバウンス)
-4. 生成ボタンでフォトモザイクを生成。進捗バー(割当済み/全体ブロック数)と
-   フェーズ表示が進み、完成した行バッチから順にプレビューが置き換わる
-   (WASM 経由・16ms 以上のスロットリング)。キャンセル操作あり
+4. 生成ボタンでフォトモザイクを生成。生成は Web Worker 内のコアで実行し、
+   メインスレッドを止めずに不定進捗とフェーズを表示する。完成した行バッチから
+   順にプレビューが置き換わる。キャンセル操作あり
 5. 保存で選択形式(PNG / JPEG)でダウンロードし、リセット/戻るで S1 へ戻る。
    色補正の強さ・重複とみなす色の近さのスライダーで描画結果を調整できる
    (いずれもドラッグ確定時に再生成)
 
-グリッド計算からフォトモザイク生成までは WASM コアで実行する。WASM のロードに失敗した環境ではモックへフォールバックする。
+グリッド計算からフォトモザイク生成までは WASM コアを Web Worker で実行する。Worker の初期化に失敗した環境ではメインスレッド版の WASM コアへフォールバックし、それも失敗した場合はモックへフォールバックする。
+
+### WASM 版 / 純 TypeScript 版
+
+同じ UI を 2 つのコア実装で提供する。性能比較や WASM 非対応環境での動作確認に使う。
+
+- WASM 版: `https://keiji.github.io/photomosaic-wasm/`(`index.html`)
+- 純 TypeScript 版: `https://keiji.github.io/photomosaic-wasm/index_js.html`(`index_js.html`)
+
+純 TypeScript 版は Rust コア(`core/src/*.rs`)を `web/src/core/js/` へ移植したもので、WASM をロードしない。両ページともコアを Web Worker で実行し、Service Worker により完全オフラインで動作する。
 
 ### コア(WASM)のビルド
 
-wasm-pack 生成物(`web/src/wasm/`)はリポジトリに同梱しており、**CI が最新コアソースから自動で再ビルドしてコミットする**。そのため、Web アプリの開発に Rust 環境は不要。
+wasm-pack 生成物(`web/src/wasm/`)はリポジトリに同梱しており、**CI が最新コアソースから自動で再ビルドしてコミットする**。そのため、Web アプリの開発に Rust 環境は不要。WASM は速度優先の `opt-level = 3` でビルドし、バイナリサイズは約 191 KB(CI の 500 KB 上限以内)に収めている。
 
 コア(`core/`・`core-wasm/`)を変更した場合も、ローカルでの再ビルドは不要(プッシュ後の CI が生成物を更新する)。ローカルで試す場合は以下を実行する:
 

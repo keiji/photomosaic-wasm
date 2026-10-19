@@ -48,7 +48,8 @@ jobs:
         working-directory: web
         run: npm ci
 
-      - name: Build WASM
+      - name: Build WASM (opt-level=3)
+        # core-wasm/Cargo.toml の速度優先プロファイルを適用する
         working-directory: web
         run: npm run wasm:build
 

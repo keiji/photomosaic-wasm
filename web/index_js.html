@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>フォトモザイク メーカー（JS版・オフライン動作）</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="app-header">
+        <h1 id="app-title"></h1>
+      </header>
+
+      <main>
+        <!-- S1 開始画面 -->
+        <section id="screen-start" aria-labelledby="start-heading">
+          <h2 id="start-heading" class="visually-hidden">開始画面</h2>
+
+          <!-- ① メイン画像 -->
+          <div
+            id="main-drop-zone"
+            class="drop-zone"
+            role="button"
+            tabindex="0"
+            aria-describedby="privacy-notice"
+          >
+            <p id="main-drop-hint" class="drop-zone-hint"></p>
+          </div>
+
+          <!-- ② 構成画像(タイル): 複数受付・サムネイル一覧・個別削除(M3) -->
+          <div id="tile-section">
+            <h3 id="tile-heading"></h3>
+            <div
+              id="tile-drop-zone"
+              class="drop-zone drop-zone-soft"
+              role="button"
+              tabindex="0"
+              aria-describedby="privacy-notice"
+            >
+              <p id="tile-drop-hint" class="drop-zone-hint"></p>
+            </div>
+            <p id="tiles-ready-hint" class="tiles-hint" hidden></p>
+            <!-- タイル一覧(S1 / S2 で表示位置を移動させる) -->
+            <div id="tile-list-start"></div>
+          </div>
+
+          <p id="error-notice" class="error-notice" role="alert" hidden></p>
+
+          <p id="privacy-notice" class="privacy-notice"></p>
+        </section>
+
+        <!-- S2 編集画面 -->
+        <section id="screen-edit" aria-labelledby="edit-heading" hidden>
+          <div class="edit-toolbar">
+            <button type="button" id="back-button" class="button"></button>
+            <h2 id="edit-heading" class="edit-title"></h2>
+            <!-- 保存形式(M8・詳細設計書 4.7: 既定 PNG。JPEG の品質は 92) -->
+            <label class="visually-hidden" for="save-format" id="save-format-label"></label>
+            <select id="save-format" class="save-format">
+              <option value="png">PNG</option>
+              <option value="jpeg">JPEG</option>
+            </select>
+            <button type="button" id="save-button" class="button button-primary" disabled></button>
+          </div>
+
+          <!-- プレビューキャンバス(メイン画像 → フォトモザイク)。
+               クリック/ドロップでメイン画像を変更できる(基本設計書 3.3) -->
+          <div id="preview-frame" role="button" tabindex="0" aria-describedby="preview-hint">
+            <canvas id="preview-canvas" role="img"></canvas>
+          </div>
+          <p id="preview-hint" class="tiles-hint"></p>
+
+          <!-- ブロックサイズ -->
+          <div id="block-size-section" class="control-row">
+            <label for="block-size-slider" id="block-size-label"></label>
+            <input type="range" id="block-size-slider" min="8" max="128" step="1" value="24" />
+            <output id="block-size-value" for="block-size-slider"></output>
+          </div>
+
+          <!-- メイン画像ブレンド(詳細設計書 4.6): 元画像を重ねる不透明度。
+               数値は表示せず、ドラッグ確定(マウスを離した)時に再計算する -->
+          <div id="main-blend-section" class="control-row">
+            <label for="main-blend-slider" id="main-blend-label"></label>
+            <input type="range" id="main-blend-slider" min="0" max="0.8" step="0.05" value="0.2" />
+          </div>
+
+          <!-- 色補正強度(M8・詳細設計書 4.6/5 章 α): タイルのトーンをブロック平均色へ
+               寄せる強さ。数値は表示せず、ドラッグ確定(マウスを離した)時に再計算する -->
+          <div id="color-correct-section" class="control-row">
+            <label for="color-correct-slider" id="color-correct-label"></label>
+            <input
+              type="range"
+              id="color-correct-slider"
+              min="0"
+              max="1"
+              step="0.05"
+              value="0.85"
+            />
+          </div>
+
+          <!-- 重複制御(M8・詳細設計書 4.4/5 章 duplicate_de): 似たタイルを同一視する
+               代表色の距離。数値は表示せず、ドラッグ確定(マウスを離した)時に再計算する -->
+          <div id="duplicate-section" class="control-row">
+            <label for="duplicate-de-slider" id="duplicate-de-label"></label>
+            <input type="range" id="duplicate-de-slider" min="0.5" max="8" step="0.5" value="2" />
+          </div>
+
+          <!-- フォトモザイク一括生成(M4)。GENERATING 中はキャンセル操作(M5) -->
+          <div id="generate-section" class="control-row">
+            <button
+              type="button"
+              id="generate-button"
+              class="button button-primary"
+              disabled
+            ></button>
+            <button type="button" id="cancel-button" class="button" hidden></button>
+            <p id="tiles-required-hint" class="tiles-hint" hidden></p>
+          </div>
+
+          <!-- 進捗表示領域(S3)。開閉可。既定: 表示 -->
+          <div id="progress-section">
+            <div class="progress-header">
+              <span id="progress-title"></span>
+              <button
+                type="button"
+                id="progress-toggle"
+                class="button button-small"
+                aria-expanded="true"
+                aria-controls="progress-body"
+              ></button>
+            </div>
+            <div id="progress-body">
+              <div
+                id="progress-bar"
+                role="progressbar"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow="0"
+              >
+                <div id="progress-bar-fill"></div>
+              </div>
+              <span id="progress-label"></span>
+              <span id="phase-label" role="status"></span>
+            </div>
+          </div>
+
+          <!-- 構成画像(S2): メイン画像と同じドロップ領域形式で追加する -->
+          <div id="tile-edit-section">
+            <div
+              id="tile-drop-zone-edit"
+              class="drop-zone drop-zone-soft"
+              role="button"
+              tabindex="0"
+              aria-describedby="privacy-notice"
+            >
+              <p id="tile-drop-hint-edit" class="drop-zone-hint"></p>
+            </div>
+            <div class="control-row">
+              <span id="tile-summary"></span>
+              <span id="tile-memory" class="tile-memory"></span>
+            </div>
+          </div>
+          <div id="tile-list-edit"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/main-js.ts"></script>
+  </body>
+</html>

@@ -61,6 +61,8 @@ export const messages = {
   progressShow: '表示 ▼',
   progressBlocksLabel: (assigned: number, total: number, percent: number): string =>
     `${assigned.toLocaleString('ja-JP')} / ${total.toLocaleString('ja-JP')} ブロック (${percent}%)`,
+  /** Worker 実行時はバッチ進捗を UI へ即時反映しないため、不定進捗を表示する */
+  progressIndeterminate: '生成中…（進捗率は表示できません）',
 
   // フェーズ文言(フェーズ ID → UI 文言。詳細設計書 7.1 の対応表)
   phaseIdle: '待機中',

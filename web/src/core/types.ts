@@ -163,6 +163,12 @@ export interface MetricsRun {
  * M4 で一括生成(run)と設定(getConfig/setConfig)を追加した(P3+P4)。
  */
 export interface CoreBridge {
+  /**
+   * 進捗表示の方式。
+   * Worker 実行時はバッチ間の rAF を行わないため、UI は不定進捗を使う。
+   * 省略時は確定進捗として扱う。
+   */
+  readonly progressMode?: 'determinate' | 'indeterminate';
   /** コアのバージョン文字列。UI とコアの不整合検知に使用する */
   getVersion(): Promise<string>;
   /** メイン画像を設定し、グリッド・ブロック特徴量を計算して全体ブロック数を返す(P1) */
