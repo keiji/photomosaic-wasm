@@ -35,7 +35,7 @@ import { MetricsOverlay } from './ui/metricsOverlay';
  * キャッシュ汚染を避ける)。失敗してもアプリはオンラインで動く */
 function registerServiceWorker(): void {
   if (import.meta.env.PROD && 'serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch((err) => {
+    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch((err) => {
       console.warn('service worker registration failed', err);
     });
   }

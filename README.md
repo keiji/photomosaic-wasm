@@ -83,6 +83,17 @@ npm run build       # 型チェック + 本番ビルド(dist/ へ出力)
 
 CI(.github/workflows/ci.yml)はプッシュ毎に cargo fmt/clippy/test + wasm-pack build + バイナリサイズチェック(≤ 500 KB)+ Web 側の全検査を実行する。
 
+### GitHub Pages への公開
+
+Web アプリは GitHub Pages のプロジェクトページとして公開する。
+
+- URL: `https://keiji.github.io/photomosaic-wasm/`
+- 実行トリガー: 手動実行(`workflow_dispatch`)または `v*` タグの push
+- ワークフロー: `.github/workflows/pages.yml`
+- リポジトリが private でも、公開された Pages サイトは public である
+
+公開前に Vite の `base` を `/photomosaic-wasm/` に設定し、Service Worker の登録・キャッシュをプロジェクトページ配下で解決する。
+
 ## ライセンス
 
 MIT

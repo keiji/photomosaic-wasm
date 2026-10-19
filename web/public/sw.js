@@ -10,14 +10,17 @@
  * バイパス: 生成物以外のページ遷移(HTML は 1 枚)はネットワーク先行で
  * 更新しつつ、取得できない場合にキャッシュへフォールバックする。
  */
-const CACHE_NAME = 'photomosaic-offline-v1';
+const CACHE_NAME = 'photomosaic-offline-v2';
+
+/** GitHub Pages のプロジェクトページ配下でも動くよう、scope 基準で解決する */
+const INDEX_PATH = new URL('index.html', self.registration.scope).pathname;
 
 /** install 時に既知の固定ページを先に載せる(2 回目以降の完全オフライン) */
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(['/', '/index.html']))
+      .then((cache) => cache.addAll(['./', './index.html']))
       .then(() => self.skipWaiting()),
   );
 });
@@ -44,9 +47,12 @@ self.addEventListener('fetch', (event) => {
   }
 
   // 同一オリジン: キャッシュ優先で応答し、無ければ取得してキャッシュに積む。
-  // ビルド成果物(/assets/*)は内容ハッシュの URL なので cache-first で安全。
+  // ビルド成果物(assets/*)は内容ハッシュの URL なので cache-first で安全。
   // index.html(ルート)のみ、ネットワーク先行・失敗時キャッシュで更新性を確保する
-  const isHtml = request.destination === 'document' || url.pathname === '/';
+  const isHtml =
+    request.mode === 'navigate' ||
+    request.destination === 'document' ||
+    url.pathname === INDEX_PATH;
   event.respondWith(
     (async () => {
       if (isHtml) {

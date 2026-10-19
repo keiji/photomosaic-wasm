@@ -61,7 +61,7 @@
 - メイン画像・構成画像に顔写真が含まれていても、データが端末の外に出る経路が存在しない。
 - Android アプリは `INTERNET` パーミッションを要求しない。
 - Android の JavaScript エンジンはアプリとは別プロセスのサンドボックス(`JavaScriptSandbox`)上で動き、ネットワークもファイルシステムも直接扱えない。ローカルのアセットから読み込んだコードのみを実行する(多層防御)。
-- Web アプリは GitHub Pages で公開する。初回アクセス時の静的アセット取得後はネットワーク断でも動作する(Service Worker によるキャッシュ。HTTPS は GitHub Pages が満たす)。
+- Web アプリは GitHub Pages のプロジェクトページ(`https://keiji.github.io/photomosaic-wasm/`)で公開する。手動実行または `v*` タグの push でデプロイする(`.github/workflows/pages.yml`)。リポジトリが private でも公開サイトは public である。初回アクセス時の静的アセット取得後はネットワーク断でも動作する(Service Worker によるキャッシュ。HTTPS は GitHub Pages が満たす)。
 - テレメトリ・クラッシュレポート・広告などの通信機能は実装しない。
 - 保存したフォトモザイク画像には入力画像のメタデータ(EXIF の撮影位置等)を引き継がない(ピクセルからの再エンコードにより取り除く)。
 
