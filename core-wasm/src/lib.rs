@@ -193,6 +193,8 @@ fn begin_run_record(block_size_px: u32, config: &MosaicConfig, tiles_bytes: u64)
             w_d: config.w_d,
             usage_penalty: config.usage_penalty,
             neighbor_penalty: config.neighbor_penalty,
+            duplicate_de: config.duplicate_de,
+            duplicate_detail: config.duplicate_detail,
             color_correct: config.color_correct,
             row_batch: config.row_batch,
         };
@@ -527,9 +529,12 @@ pub fn begin_rematch() -> Result<(), JsValue> {
         };
         main.tiles_added_since_match = false;
         if rematch_needed {
-            // 使用回数を現割当表から再集計する(4.4: ペナルティの連続性を保つ)
+            // 使用回数を現割当表から再集計する(4.4: ペナルティの連続性を保つ)。
+            // mem::take 後の main.assigned は空のため、取り出した現割当表(assigned)を
+            // 渡す(空表を渡すと差分再マッチのたびに usage がゼロリセットされ、
+            // 使用ペナルティの連続性が失われる)
             TILE_POOL.with(|pool| {
-                pool.borrow_mut().recount_usage(&main.assigned);
+                pool.borrow_mut().recount_usage(&assigned);
             });
         }
         // 出力バッファのシードは現時点の合成結果(差分はこの上に上書き)。
@@ -695,6 +700,8 @@ pub fn set_config(json: String) -> Result<(), JsValue> {
         neighbor_penalty: f32_field("neighbor_penalty")?,
         identical_de: f32_field("identical_de")?,
         improve_margin: f32_field("improve_margin")?,
+        duplicate_de: f32_field("duplicate_de")?,
+        duplicate_detail: f32_field("duplicate_detail")?,
         usage_cap: u32_field("usage_cap")?,
         color_correct: f32_field("color_correct")?,
         row_batch: u32_field("row_batch")?,
@@ -719,6 +726,8 @@ fn config_to_json(config: &MosaicConfig) -> Result<String, JsValue> {
         ("neighbor_penalty", f64::from(config.neighbor_penalty)),
         ("identical_de", f64::from(config.identical_de)),
         ("improve_margin", f64::from(config.improve_margin)),
+        ("duplicate_de", f64::from(config.duplicate_de)),
+        ("duplicate_detail", f64::from(config.duplicate_detail)),
         ("usage_cap", f64::from(config.usage_cap)),
         ("color_correct", f64::from(config.color_correct)),
         ("row_batch", f64::from(config.row_batch)),

@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(out.len(), 32 * 32 * 4);
         assert_eq!(
             fnv1a64(&out),
-            0x2509_3387_3867_1299, // 周囲重み付き平均(tile_border_weight)の導入でマッチ・補正が変化
+            0x766A_173A_06CF_D149, // 重複グループ(使用ペナルティのグループ合計化)の導入でマッチが変化
             "golden hash mismatch: inspect intentional spec changes and update this value"
         );
     }

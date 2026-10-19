@@ -588,10 +588,19 @@ mod tests {
             let mut feature_arg = vec![0_u8; FEATURE_THUMB as usize * FEATURE_THUMB as usize * 4];
             let size = 64_usize;
             let mut compose_arg = vec![0_u8; size * size * 4];
+            // タイルごとに異なる基調色 + 小さな決定的な変調で埋める。
+            // (% 256 の全周期パターンは定数シフトで平均が同一になってしまい、
+            // 全タイルが重複グループに同一視されるため、基調色を変える)
+            let base = ((tile_id - 1) % 4) as usize;
+            let (base_r, base_g, base_b) = (
+                40 + base * 50, // 40..190(変調 +7 までで 255 を超えない)
+                30 + base * 40, // 30..150(+4 まで)
+                20 + base * 30, // 20..110(+2 まで)
+            );
             for (i, pixel) in feature_arg.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                pixel[0] = ((i * 3) % 256) as u8;
-                pixel[1] = ((i * 5 + tile_id as usize * 7) % 256) as u8;
-                pixel[2] = ((i * 11 + tile_id as usize * 13) % 256) as u8;
+                pixel[0] = (base_r + i % 8) as u8;
+                pixel[1] = (base_g + i % 5) as u8;
+                pixel[2] = (base_b + i % 3) as u8;
                 pixel[3] = 255;
             }
             for (i, pixel) in compose_arg.as_chunks_mut::<4>().0.iter_mut().enumerate() {

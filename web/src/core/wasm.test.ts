@@ -238,6 +238,8 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
         neighbor_penalty: 0.5,
         identical_de: 2.0,
         improve_margin: 1.0,
+        duplicate_de: 2.0,
+        duplicate_detail: 4.0,
         usage_cap: 4,
         color_correct: 0.85,
         row_batch: 8,
@@ -261,6 +263,12 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       );
       expect(() => wasm.set_config(JSON.stringify({ ...config, improve_margin: 0.4 }))).toThrow(
         /improve_margin/,
+      );
+      expect(() => wasm.set_config(JSON.stringify({ ...config, duplicate_de: 0.4 }))).toThrow(
+        /duplicate_de/,
+      );
+      expect(() => wasm.set_config(JSON.stringify({ ...config, duplicate_detail: 40 }))).toThrow(
+        /duplicate_detail/,
       );
       // 失敗した set は既存設定(既定へ復元済み)を壊さない
       expect(JSON.parse(wasm.get_config()).color_correct).toBeCloseTo(0.85, 5);
@@ -442,6 +450,92 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       wasm.run();
       const reference = wasm.export_main_image();
       expect(Array.from(after)).toEqual(Array.from(reference));
+    });
+
+    it('差分再マッチの開始時に使用回数が現割当表から再集計される(回帰: ペナルティの連続性)', () => {
+      // 詳細設計書 4.4「使用回数 usage は再マッチ後に現割当表から再集計する。
+      // ペナルティの連続性を保つ」の回帰テスト。begin_rematch が再集計に空の
+      // 割当表を渡すと差分再マッチのたびに usage がゼロリセットされ、使用
+      // ペナルティが効かなくなる(同じタイルが選ばれ続ける)。
+      //
+      // 条件(決定的): 上 4 行 12 ブロックは明るいグレー(A)、下 1 行 3 ブロックは
+      // 暗いグレー(B)。タイル 1(A から ΔE 約 2.5)は初回ランで A の 12 ブロック
+      // すべてに選ばれる(タイル 3 は A から ΔE 約 8.7)。B に対しては t1(ΔE 約
+      // 2.7)が t3(ΔE 約 3.5)より近い → usage がゼロリセットなら B も t1 が
+      // 選ばれる。現割当表から再集計(u1 = 12 → ペナルティ 4.2)されていれば
+      // B は t3 が選ばれる(下段が緑になる)
+      const grayThumb = (v: number): Uint8Array => {
+        const data = new Uint8Array(32 * 32 * 4);
+        for (let offset = 0; offset < data.length; offset += 4) {
+          data[offset] = v;
+          data[offset + 1] = v;
+          data[offset + 2] = v;
+          data[offset + 3] = 255;
+        }
+        return data;
+      };
+      /** グレー v 基調で black/256 の画素を黒に混ぜた特徴量サムネイル(L* を下げる) */
+      const mixedThumb = (v: number, black: number): Uint8Array => {
+        const data = grayThumb(v);
+        for (let i = 0; i < 32 * 32; i++) {
+          if (i % 256 < black) {
+            data[i * 4] = 0;
+            data[i * 4 + 1] = 0;
+            data[i * 4 + 2] = 0;
+          }
+        }
+        return data;
+      };
+      /** 上 96px 行が sRGB 127・下 24px 行が sRGB 114 の 72x120 メイン画像 */
+      const twoToneMain = (): Uint8Array => {
+        const data = new Uint8Array(72 * 120 * 4);
+        for (let y = 0; y < 120; y++) {
+          const v = y < 96 ? 127 : 114;
+          for (let x = 0; x < 72; x++) {
+            const offset = (y * 72 + x) * 4;
+            data[offset] = v;
+            data[offset + 1] = v;
+            data[offset + 2] = v;
+            data[offset + 3] = 255;
+          }
+        }
+        return data;
+      };
+      const at = (rgba: Uint8Array, x: number, y: number) => rgba[(y * 72 + x) * 4];
+      const atG = (rgba: Uint8Array, x: number, y: number) => rgba[(y * 72 + x) * 4 + 1];
+
+      const saved = wasm.get_config();
+      try {
+        // 5 ブロック行を 4+1 に分ける(row_batch=4)。1 バッチ目でマッチを止めて
+        // 差分再マッチ(FillUnmatched)を発生させる
+        wasm.set_config(JSON.stringify({ ...JSON.parse(saved), row_batch: 4 }));
+        wasm.set_main_image(twoToneMain(), 72, 120);
+        // t1: A から ΔE 約 2.5 / B から約 2.7(赤で描く)。t3: A から約 8.7 /
+        // B から約 3.5(緑で描く)。両者は ΔE 約 6.2 で別グループ
+        wasm.add_tile(1n, mixedThumb(127, 27), composeThumb(64, 64, [200, 60, 60]), 64, 64);
+        wasm.add_tile(3n, mixedThumb(127, 85), composeThumb(64, 64, [60, 200, 60]), 64, 64);
+
+        wasm.begin_run();
+        const first = wasm.step_run(20);
+        const firstDone = first.done;
+        first.free();
+        expect(firstDone).toBe(false); // 1 バッチ目(上 4 行)のみマッチ済み
+
+        wasm.cancel();
+        wasm.begin_rematch();
+        driveSteps();
+
+        // 下段(未確定だった 3 ブロック): 再集計された使用ペナルティで t3 が
+        // 選ばれる(ゼロリセットされていれば t1 の赤になる)
+        const composed = wasm.export_main_image();
+        expect(atG(composed, 12, 108)).toBeGreaterThan(150); // 緑
+        expect(at(composed, 12, 108)).toBeLessThan(100);
+        expect(atG(composed, 60, 108)).toBeGreaterThan(150);
+        expect(atG(composed, 12, 116)).toBeGreaterThan(150);
+      } finally {
+        // 後続テストは既定設定を前提とするため復元する
+        wasm.set_config(saved);
+      }
     });
 
     it('再マッチ不要な rematch(import なし・未確定なし)は即時に完了する', () => {

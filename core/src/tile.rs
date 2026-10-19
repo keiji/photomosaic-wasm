@@ -179,12 +179,36 @@ impl fmt::Display for TilePoolError {
 
 impl std::error::Error for TilePoolError {}
 
+/// 類似タイルの同一視グループ(詳細設計書 4.4 重複グループ)。
+///
+/// 「同一写真の複製・至近バースト」が個別の使用回数で選ばれ続け、見た目上
+/// 同じ写真が並んで使われるのを防ぐ。代表色の距離(ΔE76)が `duplicate_de`
+/// 以下かつ `detail` 差が `duplicate_detail` 以下のタイル同士を 1 グループに
+/// まとめ、使用ペナルティ・隣接ペナルティ・usage_cap のリセット判定を
+/// グループ単位で評価させる( [`TilePool::effective_usage`] / [`TilePool::same_group`] /
+/// [`TilePool::all_usage_reached`] )。
+///
+/// 構築は決定的: タイルを ID 昇順に走査し、既存グループの代表(= グループ内
+/// 最小 ID)と閾値内ならそこへ参加、なければ新規グループ。A≈B・B≈C だが
+/// A≉C の連鎖は同一視しない(過マージ防止)
+struct DuplicateGroups {
+    /// 構築時の閾値(異なる閾値での再構築判定に使用)
+    duplicate_de: f32,
+    duplicate_detail: f32,
+    /// タイル ID → グループ番号
+    index: BTreeMap<u64, u32>,
+    /// グループごとの使用回数合計(個別 usage から導出し bump/decrease で同期)
+    usage: Vec<u32>,
+}
+
 /// タイルプール(解析済み構成画像の集合。詳細設計書 9 章の用語)。
 ///
 /// 特徴量に加え、P4 合成で使う合成用サムネイルをコア内に保持する。
 /// 合成用サムネイルの合計バイト数はメモリガードで監視し、超過の場合は
 /// 長辺を自動で半減する(解像度を落として登録を続ける。詳細設計書 5 章/6 章)。
-/// 大量タイル(> kd_tree_threshold)ではマッチング候補取得に k-d 木を使う
+/// 大量タイル(> kd_tree_threshold)ではマッチング候補取得に k-d 木を使う。
+/// 類似タイルの同一視グループ(詳細設計書 4.4 重複グループ)を遅延構築で保持し、
+/// 使用ペナルティ・隣接ペナルティ・usage_cap のリセット判定をグループ単位にする
 pub struct TilePool {
     features: BTreeMap<u64, TileFeature>,
     /// 合成用サムネイル(id → (幅, 高さ, RGBA))
@@ -199,6 +223,8 @@ pub struct TilePool {
     index_build_stats: SpanAgg,
     /// k-d 木に切り替えるタイル数閾値(既定 [`KD_TREE_THRESHOLD`]。テスト上書き用)
     kd_threshold: u32,
+    /// 類似タイルの同一視グループ(遅延構築。タイルの登録変更・閾値変更で無効化)
+    groups: Option<DuplicateGroups>,
 }
 
 /// k-d 木と、木の葉での保持順に対応したタイル ID リスト
@@ -224,6 +250,7 @@ impl TilePool {
             index: None,
             index_build_stats: SpanAgg::default(),
             kd_threshold: KD_TREE_THRESHOLD,
+            groups: None,
         }
     }
 
@@ -315,8 +342,9 @@ impl TilePool {
             detail,
             usage: 0,
         };
-        // k-d 木はタイルの追加・置き換えで無効化する(次のマッチングで再構築)
+        // k-d 木・重複グループはタイルの追加・置き換えで無効化する(次のマッチングで再構築)
         self.index = None;
+        self.groups = None;
         self.features.insert(id, feature);
         self.compose_thumbs.insert(id, (w, h, buf));
         self.total_compose_bytes =
@@ -346,6 +374,7 @@ impl TilePool {
                 feature.thumb_h = h;
             }
             self.index = None; // 特徴ベクトル(寸法)は不変だが安全側で無効化する
+            self.groups = None;
         }
     }
 
@@ -357,6 +386,7 @@ impl TilePool {
                 self.total_compose_bytes -= buf.len() as u64;
                 self.features.remove(&id);
                 self.index = None;
+                self.groups = None;
                 Ok(())
             }
             None => Err(TilePoolError::UnknownTile { id }),
@@ -369,6 +399,7 @@ impl TilePool {
         self.compose_thumbs.clear();
         self.total_compose_bytes = 0;
         self.index = None;
+        self.groups = None;
     }
 
     /// 登録済みタイル数
@@ -392,18 +423,30 @@ impl TilePool {
     }
 
     /// 指定 ID の使用回数を 1 加算する(P3 の使用ペナルティ・M4 で使用開始)。
+    /// 重複グループ構築済みの場合はグループ合計も加算する(4.4)。
     /// 存在しない ID は無視する(マッチングは登録済み ID のみを扱うため防御的な no-op)
     pub fn bump_usage(&mut self, id: u64) {
         if let Some(feature) = self.features.get_mut(&id) {
             feature.usage = feature.usage.saturating_add(1);
         }
+        if let Some(groups) = self.groups.as_mut() {
+            if let Some(g) = groups.index.get(&id).copied() {
+                groups.usage[g as usize] = groups.usage[g as usize].saturating_add(1);
+            }
+        }
     }
 
     /// 指定 ID の使用回数を 1 減算する(差分再マッチの差し替え評価用。M6)。
+    /// 重複グループ構築済みの場合はグループ合計も減算する。
     /// 存在しない ID・既に 0 の場合は no-op(飽和演算)
     pub fn decrease_usage(&mut self, id: u64) {
         if let Some(feature) = self.features.get_mut(&id) {
             feature.usage = feature.usage.saturating_sub(1);
+        }
+        if let Some(groups) = self.groups.as_mut() {
+            if let Some(g) = groups.index.get(&id).copied() {
+                groups.usage[g as usize] = groups.usage[g as usize].saturating_sub(1);
+            }
         }
     }
 
@@ -418,19 +461,30 @@ impl TilePool {
     }
 
     /// 全タイルの使用回数が上限 `cap` に達しているか(詳細設計書 4.4)。
+    /// 重複グループ構築済みの場合は「全グループの合計使用回数」基準で判定する
+    /// (同一視された複製が個別の usage で cap を回避するのを防ぐ)。
     /// `cap == 0` は無制限として常に `false` を返す。プール空も `false`(リセット不要)
     pub fn all_usage_reached(&self, cap: u32) -> bool {
         if cap == 0 {
             return false;
         }
-        !self.features.is_empty() && self.features.values().all(|feature| feature.usage >= cap)
+        match self.groups.as_ref() {
+            Some(groups) => {
+                !groups.usage.is_empty() && groups.usage.iter().all(|&usage| usage >= cap)
+            }
+            None => !self.features.is_empty() && self.features.values().all(|f| f.usage >= cap),
+        }
     }
 
     /// 全タイルの使用回数を 0 に戻す(usage cap 到達時の一括リセット、
-    /// および初回マッチング前の正規化。詳細設計書 4.4)
+    /// および初回マッチング前の正規化。詳細設計書 4.4)。
+    /// 重複グループの合計も 0 に戻す
     pub fn reset_usage(&mut self) {
         for feature in self.features.values_mut() {
             feature.usage = 0;
+        }
+        if let Some(groups) = self.groups.as_mut() {
+            groups.usage.fill(0);
         }
     }
 
@@ -513,6 +567,100 @@ impl TilePool {
             .filter_map(|id| self.features.get(id).copied())
             .collect()
     }
+
+    /// 類似タイルの同一視グループを構築済みにする(遅延構築。詳細設計書 4.4)。
+    ///
+    /// - 未構築(プール変更後)または前回と閾値が異なる場合に再構築する。
+    ///   P3 マッチングの開始時に呼ばれる(1 run のマッチング中は同一のグループで評価)
+    /// - 構築は決定的: タイルを ID 昇順に走査し、既存グループの代表
+    ///   (= 先頭 = 最小 ID)と閾値内ならそこへ参加、なければ新規グループ。
+    ///   A≈B・B≈C だが A≉C の連鎖は同一視しない(過マージ防止)
+    /// - 構築所要は k-d 木と同じ `index_build_stats`(p2_index_build 計測点)へ累積する
+    pub fn ensure_groups(&mut self, duplicate_de: f32, duplicate_detail: f32) {
+        if let Some(groups) = self.groups.as_ref() {
+            if groups.duplicate_de == duplicate_de && groups.duplicate_detail == duplicate_detail {
+                return; // 構築済み・閾値不変(再構築不要)
+            }
+        }
+        let t0 = crate::metrics::now_ms();
+        let mut index: BTreeMap<u64, u32> = BTreeMap::new();
+        let mut members: Vec<Vec<u64>> = Vec::new();
+        for feature in self.features.values() {
+            let mut joined: Option<u32> = None;
+            for (g, group) in members.iter().enumerate() {
+                let rep = self
+                    .features
+                    .get(&group[0])
+                    .expect("group representative exists in the pool");
+                let de = crate::match_engine::delta_e76(&feature.mean_lab, &rep.mean_lab);
+                if de <= duplicate_de && (feature.detail - rep.detail).abs() <= duplicate_detail {
+                    joined = Some(g as u32);
+                    break;
+                }
+            }
+            let group = match joined {
+                Some(g) => g,
+                None => {
+                    members.push(Vec::new());
+                    (members.len() - 1) as u32
+                }
+            };
+            members[group as usize].push(feature.id);
+            index.insert(feature.id, group);
+        }
+        // グループ合計使用回数は個別 usage から導出する(以後は bump/decrease で同期)
+        let usage = members
+            .iter()
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|id| {
+                        self.features
+                            .get(id)
+                            .expect("group member exists in the pool")
+                            .usage
+                    })
+                    .sum()
+            })
+            .collect();
+        self.index_build_stats.record(crate::metrics::now_ms() - t0);
+        self.groups = Some(DuplicateGroups {
+            duplicate_de,
+            duplicate_detail,
+            index,
+            usage,
+        });
+    }
+
+    /// 指定 ID が所属する重複グループの番号(未構築・未登録は None)
+    pub fn group_of(&self, id: u64) -> Option<u32> {
+        self.groups
+            .as_ref()
+            .and_then(|groups| groups.index.get(&id).copied())
+    }
+
+    /// 2 つのタイルが同一視(同じ重複グループ)されているか(詳細設計書 4.4)。
+    /// 未構築・未登録(削除済みなど)の場合は同一 ID のみ `true`(従来動作)
+    pub fn same_group(&self, a: u64, b: u64) -> bool {
+        match (self.group_of(a), self.group_of(b)) {
+            (Some(ga), Some(gb)) => ga == gb,
+            _ => a == b,
+        }
+    }
+
+    /// 指定 ID の使用回数(詳細設計書 4.4: 重複グループの合計使用回数)。
+    /// 未構築の場合は個別の使用回数(グループが 1 枚なら同一の値)。
+    /// 未登録 ID は 0
+    pub fn effective_usage(&self, id: u64) -> u32 {
+        if let Some(groups) = self.groups.as_ref() {
+            match groups.index.get(&id) {
+                Some(g) => groups.usage[*g as usize],
+                None => 0,
+            }
+        } else {
+            self.features.get(&id).map(|f| f.usage).unwrap_or(0)
+        }
+    }
 }
 
 impl Default for TilePool {
@@ -580,6 +728,7 @@ impl TilePool {
     /// 検証を行うため、距離計算・usage 制御のみの単体テストで使用する)
     pub(crate) fn insert_feature_for_test(&mut self, feature: TileFeature) {
         self.index = None;
+        self.groups = None;
         self.features.insert(feature.id, feature);
     }
 
@@ -588,6 +737,7 @@ impl TilePool {
     /// テストで使用する。合成用サムネイルは add_tile 登録分をそのまま使う)
     pub(crate) fn overwrite_feature_for_test(&mut self, feature: TileFeature) {
         self.index = None;
+        self.groups = None;
         if let Some(stored) = self.features.get_mut(&feature.id) {
             *stored = feature;
         }
@@ -917,6 +1067,137 @@ mod tests {
         assert_eq!(pool.feature(1).expect("tile 1").usage, 0);
         // 存在しない ID も no-op
         pool.decrease_usage(999);
+    }
+
+    /// テスト用の特徴量を直接構築する((id, mean_lab, detail) から)
+    fn feature(id: u64, mean_lab: [f32; 3], detail: f32) -> TileFeature {
+        TileFeature {
+            id,
+            thumb_w: 64,
+            thumb_h: 64,
+            mean_lab,
+            detail,
+            usage: 0,
+        }
+    }
+
+    #[test]
+    fn duplicate_groups_merge_near_tiles() {
+        // 詳細設計書 4.4 重複グループ: 代表色が duplicate_de 以下かつ detail 差が
+        // duplicate_detail 以下のタイルは同一視される(色だけ・detail だけでは同一視しない)
+        let mut pool = TilePool::new();
+        pool.insert_feature_for_test(feature(1, [50.0, 0.0, 0.0], 5.0));
+        pool.insert_feature_for_test(feature(2, [51.0, 0.0, 0.0], 5.5)); // ΔE 1 / detail 差 0.5 → 同一視
+        pool.insert_feature_for_test(feature(3, [51.0, 0.0, 0.0], 30.0)); // detail 差 25 → 別物
+        pool.insert_feature_for_test(feature(4, [70.0, 0.0, 0.0], 5.0)); // ΔE 19 → 別物
+        pool.ensure_groups(2.0, 4.0);
+        assert!(pool.same_group(1, 2), "色距離 1 は同一視される");
+        assert!(!pool.same_group(1, 3), "detail 差 25 は別物");
+        assert!(!pool.same_group(2, 3));
+        assert!(!pool.same_group(1, 4), "色距離 19 は別物");
+        // 未登録 ID は同一 ID のみ true(削除済み割当の参照などの防御)
+        assert!(!pool.same_group(1, 999));
+        assert!(pool.same_group(999, 999));
+    }
+
+    #[test]
+    fn duplicate_groups_do_not_chain() {
+        // A≈B・B≈C だが A≉C の連鎖は同一視しない(代表 = 最小 ID 基準。過マージ防止)
+        let mut pool = TilePool::new();
+        pool.insert_feature_for_test(feature(1, [50.0, 0.0, 0.0], 0.0));
+        pool.insert_feature_for_test(feature(2, [51.5, 0.0, 0.0], 0.0)); // 1 とは 1.5 → 同一視
+        pool.insert_feature_for_test(feature(3, [53.0, 0.0, 0.0], 0.0)); // 2 とは 1.5 だが 1 とは 3.0 → 別
+        pool.ensure_groups(2.0, 4.0);
+        assert!(pool.same_group(1, 2));
+        assert!(!pool.same_group(2, 3));
+        assert!(!pool.same_group(1, 3));
+    }
+
+    #[test]
+    fn duplicate_groups_share_usage() {
+        // グループ合計の使用回数: bump / decrease / recount / reset が個別 usage と同期する
+        let mut pool = TilePool::new();
+        pool.insert_feature_for_test(feature(1, [50.0, 0.0, 0.0], 0.0));
+        pool.insert_feature_for_test(feature(2, [50.4, 0.0, 0.0], 0.0)); // 同一グループ
+        pool.insert_feature_for_test(feature(3, [70.0, 0.0, 0.0], 0.0)); // 別グループ
+        pool.ensure_groups(2.0, 4.0);
+        pool.bump_usage(1);
+        pool.bump_usage(1);
+        // 同一グループの合計(1 の 2 回)が 2 の使用回数として見える
+        assert_eq!(pool.effective_usage(1), 2);
+        assert_eq!(pool.effective_usage(2), 2);
+        assert_eq!(pool.effective_usage(3), 0);
+        // 割当表からの再集計もグループ合計に反映する(1 と 2 で合計 2)
+        pool.recount_usage(&[Some(1), Some(2), Some(3)]);
+        assert_eq!(pool.effective_usage(1), 2);
+        assert_eq!(pool.effective_usage(2), 2);
+        assert_eq!(pool.effective_usage(3), 1);
+        // 減算も同期する
+        pool.decrease_usage(1);
+        assert_eq!(pool.effective_usage(1), 1);
+        // リセットは個別・グループ合計の双方を 0 に戻す
+        pool.reset_usage();
+        assert_eq!(pool.effective_usage(1), 0);
+        assert_eq!(pool.feature(1).expect("tile 1").usage, 0);
+    }
+
+    #[test]
+    fn duplicate_groups_apply_usage_cap_per_group() {
+        // usage_cap の一括リセット判定(all_usage_reached)はグループ合計基準
+        // (同一視された複製で個別 usage のまま cap 到達を回避できなくする)
+        let mut pool = TilePool::new();
+        pool.insert_feature_for_test(feature(1, [50.0, 0.0, 0.0], 0.0));
+        pool.insert_feature_for_test(feature(2, [50.4, 0.0, 0.0], 0.0)); // 同一グループ
+        pool.insert_feature_for_test(feature(3, [70.0, 0.0, 0.0], 0.0)); // 別グループ
+        pool.ensure_groups(2.0, 4.0);
+        pool.bump_usage(1);
+        pool.bump_usage(1);
+        assert!(!pool.all_usage_reached(2), "別グループ(3)が未到達");
+        pool.bump_usage(3);
+        pool.bump_usage(3);
+        assert!(pool.all_usage_reached(2), "全グループの合計が cap に到達");
+        pool.reset_usage();
+        assert!(!pool.all_usage_reached(2));
+    }
+
+    #[test]
+    fn duplicate_groups_rebuild_on_pool_and_threshold_change() {
+        // プール変更(追加・削除)と閾値変更で再構築される(遅延構築の無効化)
+        let mut pool = TilePool::new();
+        pool.insert_feature_for_test(feature(1, [50.0, 0.0, 0.0], 0.0));
+        pool.insert_feature_for_test(feature(2, [50.9, 0.0, 0.0], 0.0)); // ΔE 0.9
+        pool.ensure_groups(2.0, 4.0);
+        assert!(pool.same_group(1, 2));
+        // タイル追加で未構築に戻る(同一 ID のみ true の従来動作)
+        pool.insert_feature_for_test(feature(4, [80.0, 0.0, 0.0], 0.0));
+        assert!(!pool.same_group(1, 2));
+        pool.ensure_groups(2.0, 4.0);
+        assert!(pool.same_group(1, 2));
+        // 閾値を狭めると ΔE 0.9 は別グループになる
+        pool.ensure_groups(0.5, 4.0);
+        assert!(!pool.same_group(1, 2));
+    }
+
+    #[test]
+    fn add_tile_invalidates_duplicate_groups() {
+        // 本経路(add_tile / remove_tile)でもグループを無効化する
+        let mut pool = TilePool::new();
+        pool.add_tile(1, &magenta_feature(), &compose_rgba(64, 64), 64, 64)
+            .expect("add should succeed");
+        pool.add_tile(2, &magenta_feature(), &compose_rgba(64, 64), 64, 64)
+            .expect("add should succeed");
+        pool.ensure_groups(2.0, 4.0);
+        assert!(pool.same_group(1, 2), "同一サムネイルの 2 枚は同一視される");
+        pool.add_tile(3, &magenta_feature(), &compose_rgba(64, 64), 64, 64)
+            .expect("add should succeed");
+        assert!(!pool.same_group(1, 2), "追加で未構築に戻る");
+        pool.ensure_groups(2.0, 4.0);
+        assert!(pool.same_group(1, 2));
+        assert!(pool.same_group(1, 3));
+        pool.remove_tile(1).expect("remove should succeed");
+        assert!(!pool.same_group(2, 3), "削除で未構築に戻る");
+        pool.ensure_groups(2.0, 4.0);
+        assert!(pool.same_group(2, 3));
     }
 
     #[test]

@@ -204,6 +204,8 @@ async function main(): Promise<void> {
   const tileList = new TileList(tileListStartContainer, {
     onRemove: (id) => void removeTile(id),
     removeLabelFor: (id) => messages.tileRemoveLabel(id),
+    showAllLabelFor: (hidden) => messages.tileShowAllLabel(hidden),
+    loadingLabelFor: (done, total) => messages.tileLoadingProgress(done, total),
   });
 
   const syncTileStats = (): void => {
@@ -250,10 +252,18 @@ async function main(): Promise<void> {
   };
 
   // --- 構成画像の受け付け(複数ファイル: 検証 → デコード → サムネイル化 → コア解析) ---
+  // 読み込み進捗の合算カウンタ(複数ドロップの同時進行でも単一の進捗として見せる)
+  let loadingTotal = 0;
+  let loadingDone = 0;
+  let activeLoads = 0;
+
   const addTileFiles = async (files: File[]): Promise<void> => {
     if (files.length === 0) return;
     clearError();
     progress.setPhase(messages.phaseTileAnalyze);
+    loadingTotal += files.length;
+    activeLoads += 1;
+    tileList.setLoadingProgress(loadingDone, loadingTotal);
 
     let added = 0;
     let rejected = 0;
@@ -265,6 +275,7 @@ async function main(): Promise<void> {
       for (const file of batch) {
         if (guardExceeded) {
           rejected += 1;
+          loadingDone += 1;
           continue;
         }
         try {
@@ -285,6 +296,10 @@ async function main(): Promise<void> {
             rejected += 1;
           }
         }
+        // 読み込み進捗と枚数・メモリ表示を 1 枚ごとに更新する
+        loadingDone += 1;
+        tileList.setLoadingProgress(loadingDone, loadingTotal);
+        syncTileStats();
       }
       await yieldToUi();
     }
@@ -308,6 +323,13 @@ async function main(): Promise<void> {
       showError(messages.tilesPartiallyAdded(added, rejected));
     }
     progress.reset();
+    // 同時進行のすべての読み込みが終わったら進捗表示を消す
+    activeLoads -= 1;
+    if (activeLoads === 0) {
+      loadingTotal = 0;
+      loadingDone = 0;
+      tileList.hideLoading();
+    }
   };
 
   setupFileZone(requireElement<HTMLElement>('#tile-drop-zone'), {

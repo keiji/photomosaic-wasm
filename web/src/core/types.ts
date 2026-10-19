@@ -85,6 +85,11 @@ export interface MosaicConfig {
   identical_de: number;
   /** 差分再マッチ(タイル追加時)の差し替え判定マージン。既定 1.0、範囲 0.5〜2.0 */
   improve_margin: number;
+  /** 類似タイルの同一視閾値(色距離 ΔE76 換算)。既定 2.0、範囲 0.5〜8.0。
+   * 閾値内の類似タイル(同一写真の複製・至近バースト)は使用回数を共有する */
+  duplicate_de: number;
+  /** 類似タイルの同一視閾値(detail 差)。既定 4.0、範囲 0〜32 */
+  duplicate_detail: number;
   /** 1 タイルの最大使用回数。既定 4、0 = 無制限 */
   usage_cap: number;
   /** 色補正強度 α。既定 0.85、範囲 0〜1.0(分母はタイルの周囲重み付き代表色) */

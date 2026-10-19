@@ -175,6 +175,26 @@ body {
   color: var(--color-text-dim);
 }
 
+/* --- 構成画像一覧のラッパー(読み込み進捗 + 一覧 + すべて表示ボタン) --- */
+.tile-list-wrap {
+  margin-top: 8px;
+}
+
+.tile-loading {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  color: var(--color-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.tile-show-all {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: var(--color-text-dim);
+}
+
 .privacy-notice {
   font-size: 0.85rem;
   color: var(--color-text-dim);

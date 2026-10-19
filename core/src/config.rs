@@ -29,6 +29,14 @@ pub struct MosaicConfig {
     /// 現割当の距離が候補の距離よりこの値以上悪いときだけ差し替える(ΔE 換算)。
     /// 既定 1.0、範囲 0.5〜2.0
     pub improve_margin: f32,
+    /// 類似タイルの同一視閾値 duplicate_de(ΔE76 換算)。既定 2.0、範囲 0.5〜8.0。
+    /// 代表色の距離がこの値以下のタイル同士は「重複グループ」にまとめられ、
+    /// 使用ペナルティ・隣接ペナルティ・usage_cap のリセット判定がグループ単位に
+    /// なる(同一写真の複製・至近バーストが個別の usage で使われ続けるのを防ぐ)
+    pub duplicate_de: f32,
+    /// 類似タイルの同一視閾値 duplicate_detail(detail 差)。既定 4.0、範囲 0〜32。
+    /// duplicate_de と併せて満たすときだけ同一視する(同色でも平坦/複雑は別物)
+    pub duplicate_detail: f32,
     /// 1 タイルの最大使用回数 usage_cap。既定 4 回、0 = 無制限
     pub usage_cap: u32,
     /// ブロック平均色へのトーン補正強度 α(color_correct)。既定 0.85、範囲 0〜1.0。
@@ -65,6 +73,8 @@ impl Default for MosaicConfig {
             neighbor_penalty: 0.5,
             identical_de: 2.0,
             improve_margin: 1.0,
+            duplicate_de: 2.0,
+            duplicate_detail: 4.0,
             usage_cap: 4,
             color_correct: 0.85,
             row_batch: 8,
@@ -119,6 +129,20 @@ impl MosaicConfig {
             "improve_margin",
             "must be in 0.5..=2.0",
         )?;
+        finite_in_range(
+            self.duplicate_de,
+            0.5,
+            8.0,
+            "duplicate_de",
+            "must be in 0.5..=8.0",
+        )?;
+        finite_in_range(
+            self.duplicate_detail,
+            0.0,
+            32.0,
+            "duplicate_detail",
+            "must be in 0.0..=32.0",
+        )?;
         if !(self.color_correct.is_finite() && (0.0..=1.0).contains(&self.color_correct)) {
             return Err(ConfigError {
                 field: "color_correct",
@@ -149,6 +173,8 @@ mod tests {
         assert_eq!(config.neighbor_penalty, 0.5);
         assert_eq!(config.identical_de, 2.0);
         assert_eq!(config.improve_margin, 1.0);
+        assert_eq!(config.duplicate_de, 2.0);
+        assert_eq!(config.duplicate_detail, 4.0);
         assert_eq!(config.usage_cap, 4);
         assert_eq!(config.color_correct, 0.85);
         assert_eq!(config.row_batch, 8);
@@ -161,7 +187,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_out_of_range() {
-        let cases: [(MosaicConfig, &'static str); 7] = [
+        let cases = [
             (
                 MosaicConfig {
                     w_c: 0.4,
@@ -211,6 +237,20 @@ mod tests {
                 },
                 "improve_margin",
             ),
+            (
+                MosaicConfig {
+                    duplicate_de: 0.4,
+                    ..MosaicConfig::default()
+                },
+                "duplicate_de",
+            ),
+            (
+                MosaicConfig {
+                    duplicate_detail: 40.0,
+                    ..MosaicConfig::default()
+                },
+                "duplicate_detail",
+            ),
         ];
         for (config, field) in cases {
             let err = config.validate().expect_err("must be rejected");
@@ -228,6 +268,8 @@ mod tests {
             neighbor_penalty: 0.0,
             identical_de: f32::MIN_POSITIVE,
             improve_margin: 0.5,
+            duplicate_de: 0.5,
+            duplicate_detail: 0.0,
             usage_cap: 0,
             color_correct: 1.0,
             row_batch: 32,
@@ -236,6 +278,8 @@ mod tests {
         let config = MosaicConfig {
             w_c: 2.0,
             improve_margin: 2.0,
+            duplicate_de: 8.0,
+            duplicate_detail: 32.0,
             row_batch: 4,
             ..MosaicConfig::default()
         };

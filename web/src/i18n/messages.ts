@@ -16,6 +16,12 @@ export const messages = {
   tileDropHint: '追加した画像がここにドロップできます(複数可)',
   tilesReadyHint: 'メイン画像を選択してください',
   tileRemoveLabel: (id: bigint): string => `この構成画像を削除(ID: ${id.toString()})`,
+  /** 「すべての画像を表示」ボタン(折りたたみ中に表示を保留している枚数) */
+  tileShowAllLabel: (hidden: number): string =>
+    `すべての画像を表示(あと ${hidden.toLocaleString('ja-JP')} 枚)`,
+  /** 構成画像の読み込み進捗(処理済み枚数 / 受け付けた総数) */
+  tileLoadingProgress: (done: number, total: number): string =>
+    `読み込み中… ${total.toLocaleString('ja-JP')}枚中 ${done.toLocaleString('ja-JP')}枚`,
 
   // S2 編集画面
   editTitle: 'フォトモザイク編集',

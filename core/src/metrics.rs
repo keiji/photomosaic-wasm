@@ -140,6 +140,9 @@ pub struct RunRecord {
     pub w_d: f32,
     pub usage_penalty: f32,
     pub neighbor_penalty: f32,
+    /// 類似タイルの同一視閾値(P3 の重複グループに影響。詳細設計書 4.4)
+    pub duplicate_de: f32,
+    pub duplicate_detail: f32,
     pub color_correct: f32,
     pub row_batch: u32,
 }
@@ -301,6 +304,8 @@ fn format_run_json(run: &RunRecord) -> String {
         ("w_c", run.w_c),
         ("w_d", run.w_d),
         ("alpha", run.color_correct),
+        ("duplicate_de", run.duplicate_de),
+        ("duplicate_detail", run.duplicate_detail),
         ("row_batch", run.row_batch as f32),
     ];
     for (key, value) in &numeric {
@@ -393,6 +398,8 @@ mod tests {
             w_d: 0.25,
             usage_penalty: 0.35,
             neighbor_penalty: 0.5,
+            duplicate_de: 2.0,
+            duplicate_detail: 4.0,
             color_correct: 0.7,
             row_batch: 8,
         };
@@ -412,6 +419,8 @@ mod tests {
         );
         assert!(json.contains("\"tiles_bytes\":19660800"));
         assert!(json.contains("\"alpha\":0.700"));
+        assert!(json.contains("\"duplicate_de\":2.000"));
+        assert!(json.contains("\"duplicate_detail\":4.000"));
     }
 
     #[test]

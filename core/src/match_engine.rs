@@ -4,6 +4,11 @@
 //!   `D = w_c * ΔE76 + w_d * |detail差| + λ * usage + n_p * neighbor_same`
 //! - 使用ペナルティの λ でタイル群を均等に散らばらせ、全タイルの使用回数が
 //!   usage_cap に達したら一括リセットする(スタック防止)
+//! - **重複グループ**(詳細設計書 4.4): 類似タイル(同一写真の複製・至近
+//!   バースト)は `duplicate_de` / `duplicate_detail` の閾値内で同一視され、
+//!   `usage` はグループ合計、`neighbor_same` は同一グループ判定、usage_cap の
+//!   リセット判定はグループ合計基準になる(見た目上同じ写真が並んで
+//!   使われるのを防ぐ)。重複がなければ全判定がタイル単位と一致する
 //! - ΔE76 < identical_de(視覚上ほぼ同一)の候補が複数ある場合は
 //!   detail が大きい方(情報量が多い方)を優先する
 //! - 走査順は「ブロック番号昇順 × タイル ID 昇順」に固定し、同一入力に対して
@@ -116,6 +121,9 @@ pub fn match_unmatched_range(
     }
     let block_begin = block_begin.min(block_end.min(blocks.len()));
     let block_end = block_end.min(blocks.len());
+    // 重複グループを構築済みにする(遅延。プール変更・閾値変更で再構築。
+    // 以後の usage・隣接判定はグループ基準になる。詳細設計書 4.4)
+    pool.ensure_groups(config.duplicate_de, config.duplicate_detail);
 
     for (i, block) in blocks.iter().enumerate().take(block_end).skip(block_begin) {
         if assigned[i].is_some() {
@@ -151,8 +159,18 @@ pub fn match_unmatched_range(
 
         for tile in pool.features_for(&candidate_ids) {
             let de = delta_e76(&block.mean_lab, &tile.mean_lab);
-            let neighbor_same = left_id == Some(tile.id) || above_id == Some(tile.id);
-            let d = distance(block, &tile, tile.usage, neighbor_same, config);
+            // 隣接ペナルティは「同一グループ」判定(同一視された複製が直上・直左に
+            // あっても加算する。詳細設計書 4.4)
+            let neighbor_same = left_id.is_some_and(|l| pool.same_group(l, tile.id))
+                || above_id.is_some_and(|a| pool.same_group(a, tile.id));
+            // 使用ペナルティはグループ合計の使用回数で評価する(4.4)
+            let d = distance(
+                block,
+                &tile,
+                pool.effective_usage(tile.id),
+                neighbor_same,
+                config,
+            );
 
             if best.is_none_or(|(best_d, _)| d < best_d) {
                 best = Some((d, tile));
@@ -206,6 +224,8 @@ pub fn evaluate_swap_range(
     }
     let block_begin = block_begin.min(block_end.min(blocks.len()));
     let block_end = block_end.min(blocks.len());
+    // 重複グループを構築済みにする(遅延。詳細設計書 4.4。match と同一の基準)
+    pool.ensure_groups(config.duplicate_de, config.duplicate_detail);
 
     for (i, block) in blocks.iter().enumerate().take(block_end).skip(block_begin) {
         let Some(current_id) = assigned[i] else {
@@ -224,11 +244,13 @@ pub fn evaluate_swap_range(
         } else {
             None
         };
-        let neighbor_current = left_id == Some(current_id) || above_id == Some(current_id);
+        // 隣接・使用ペナルティは重複グループ基準で再評価する(詳細設計書 4.4)
+        let neighbor_current = left_id.is_some_and(|l| pool.same_group(l, current_id))
+            || above_id.is_some_and(|a| pool.same_group(a, current_id));
         let current_d = distance(
             block,
             &current_tile,
-            current_tile.usage,
+            pool.effective_usage(current_id),
             neighbor_current,
             config,
         );
@@ -248,8 +270,17 @@ pub fn evaluate_swap_range(
         }
         let mut best: Option<(f32, u64)> = None;
         for tile in pool.features_for(&candidate_ids) {
-            let neighbor_same = left_id == Some(tile.id) || above_id == Some(tile.id);
-            let d = distance(block, &tile, tile.usage, neighbor_same, config);
+            // 隣接ペナルティは「同一グループ」判定、使用ペナルティはグループ合計
+            // の使用回数で評価する(詳細設計書 4.4)
+            let neighbor_same = left_id.is_some_and(|l| pool.same_group(l, tile.id))
+                || above_id.is_some_and(|a| pool.same_group(a, tile.id));
+            let d = distance(
+                block,
+                &tile,
+                pool.effective_usage(tile.id),
+                neighbor_same,
+                config,
+            );
             if best.is_none_or(|(best_d, _)| d < best_d) {
                 best = Some((d, tile.id));
             }
@@ -377,8 +408,9 @@ mod tests {
 
     #[test]
     fn usage_cap_resets_all_usage_when_reached() {
-        // 同色 2 枚(ΔE 0.5、detail 同点)は使用ペナルティで交互に選ばれ、
-        // 全タイル usage が cap に達した時点で一括リセットされる(スタック防止)
+        // 同色 2 枚(ΔE 0、detail 同点)は重複グループに同一視される(詳細設計書 4.4)。
+        // 選択は ID 小に集約され、グループ合計が cap に達した時点で一括リセットされて
+        // マッチングが継続する(スタック防止)
         let target: [f32; 3] = [50.0, 0.0, 0.0];
         let near_a: [f32; 3] = [50.5, 0.0, 0.0];
         let near_b: [f32; 3] = [50.5, 0.0, 0.0];
@@ -396,6 +428,7 @@ mod tests {
             assert!(result.tile_id == 1 || result.tile_id == 2);
         }
         // リセットが機能している: どのタイルの usage も cap(1)+α を超えない
+        // (同一視された 2 枚はグループ合計 1 で cap 到達 → 一括リセット)
         for id in [1_u64, 2] {
             assert!(
                 pool.feature(id).is_some_and(|f| f.usage <= 1),
@@ -457,19 +490,20 @@ mod tests {
 
     #[test]
     fn neighbor_penalty_flips_next_choice() {
-        // 直上と同一タイルには n_p が加算される → 近い他タイルが逆転して選ばれる
-        let target: [f32; 3] = [50.0, 0.0, 0.0];
-        let same: [f32; 3] = [50.0, 0.0, 0.0]; // ΔE76 = 0
-        let other: [f32; 3] = [50.4, 0.0, 0.0]; // ΔE76 = 0.4
+        // 直上と同一タイルには n_p が加算される → 近い他タイルが逆転して選ばれる。
+        // 2 枚は duplicate_de より遠い位置関係(直交方向)に置き互いに別グループにする
+        // (同一視された複製が隣接するケースは neighbor_penalty_applies_to_duplicate_group)
+        let target: [f32; 3] = [53.0, 0.0, 0.0];
+        let same: [f32; 3] = [50.6, 0.0, 0.0]; // ΔE76 = 2.4(identical_de・duplicate_de の外)
+        let other: [f32; 3] = [53.0, 2.5, 0.0]; // ΔE76 = 2.5(same とは約 3.5 → 別グループ)
         let blocks = uniform_blocks(target, 0.0, 2);
         let config = MosaicConfig::default();
 
         let mut pool = pool_with_tiles(&[(other, 0.0, 1), (same, 0.0, 2)]);
         let results = match_blocks(&blocks, 1, &mut pool, &config);
-        // ブロック 0: 同色 same(detail 同点 → 距離同点 → 先着は ID 昇順走査で same の方が
-        //   距離最小)… 2 枚とも ΔE0/0.4 < identical_de、detail 同点 → 距離最小の same
+        // ブロック 0: same の距離 2.4 が最小(2.5 より近い)
         assert_eq!(results[0].tile_id, 2);
-        // ブロック 1(直上 = same): D(same) = 0 + n_p(0.5) = 0.5 > D(other) = 0.4
+        // ブロック 1(直上 = same): D(same) = 2.4 + 0.35 + 0.5 = 3.25 > D(other) = 2.5
         assert_eq!(
             results[1].tile_id, 1,
             "neighbor penalty must flip the choice"
@@ -478,10 +512,11 @@ mod tests {
 
     #[test]
     fn left_neighbor_penalty_applies_within_row() {
-        // 直左(同一行の前のブロック)にもペナルティが効く: cols=2 の 1 行
-        let target: [f32; 3] = [50.0, 0.0, 0.0];
-        let same: [f32; 3] = [50.0, 0.0, 0.0];
-        let other: [f32; 3] = [50.4, 0.0, 0.0];
+        // 直左(同一行の前のブロック)にもペナルティが効く: cols=2 の 1 行。
+        // 2 枚は duplicate_de より遠い位置関係(直交方向)で互いに別グループ
+        let target: [f32; 3] = [53.0, 0.0, 0.0];
+        let same: [f32; 3] = [50.6, 0.0, 0.0]; // ΔE76 = 2.4
+        let other: [f32; 3] = [53.0, 2.5, 0.0]; // ΔE76 = 2.5(same とは別グループ)
         let blocks = uniform_blocks(target, 0.0, 2);
         let config = MosaicConfig::default();
 
@@ -499,6 +534,62 @@ mod tests {
         let config = MosaicConfig::default();
         let results = match_blocks(&blocks, 4, &mut pool, &config);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn duplicate_tiles_share_usage_penalty() {
+        // 詳細設計書 4.4 重複グループ: 類似タイル(同一視)は使用回数を共有する。
+        // A(ΔE 2.8)を使った後は A'(A と 0.2 → 同一グループ)にも使用ペナルティが
+        // 乗る。個別 usage なら A' が無ペナルティで選ばれ、見た目上同じ写真が
+        // 連続して使われる(本テストの期待値が従来動作との差分になる)
+        let target: [f32; 3] = [53.0, 0.0, 0.0];
+        let dup_a: [f32; 3] = [50.2, 0.0, 0.0]; // ΔE76 = 2.8
+        let dup_b: [f32; 3] = [50.0, 0.0, 0.0]; // ΔE76 = 3.0(A とは 0.2 → 同一グループ)
+        let distinct: [f32; 3] = [56.1, 0.0, 0.0]; // ΔE76 = 3.1(A とは 5.9 → 別グループ)
+        let blocks = uniform_blocks(target, 0.0, 3);
+        let config = MosaicConfig::default();
+
+        let mut pool = pool_with_tiles(&[(dup_a, 0.0, 1), (dup_b, 0.0, 2), (distinct, 0.0, 3)]);
+        // 前提: 1 と 2 は同一視、1 と 3 は別グループ
+        pool.ensure_groups(config.duplicate_de, config.duplicate_detail);
+        assert!(pool.same_group(1, 2));
+        assert!(!pool.same_group(1, 3));
+
+        let results = match_blocks(&blocks, 1, &mut pool, &config);
+        // ブロック 0: A(2.8)が最小 → A。ブロック 1: A は 2.8 + 0.35(グループ合計 1)、
+        // A' は 3.0 + 0.35、distinct は 3.1 → distinct が逆転
+        // (個別 usage なら A' 3.0 が選ばれる)。ブロック 2: A と distinct はともに
+        // 使用 1 回で距離差がそのまま効き、A(3.15)が選ばれる
+        let tile_ids: Vec<u64> = results.iter().map(|r| r.tile_id).collect();
+        assert_eq!(
+            tile_ids,
+            vec![1, 3, 1],
+            "duplicate tiles must share the usage penalty"
+        );
+    }
+
+    #[test]
+    fn neighbor_penalty_applies_to_duplicate_group() {
+        // 詳細設計書 4.4: 隣接ペナルティは「同一グループ」判定。
+        // 直上に A があるとき、A と同一視された A' にも n_p と使用ペナルティが
+        // 乗る(個別判定なら A' が無ペナルティで隣に選ばれる)
+        let target: [f32; 3] = [53.0, 0.0, 0.0];
+        let dup_a: [f32; 3] = [50.0, 0.0, 0.0]; // ΔE76 = 3.0
+        let dup_b: [f32; 3] = [49.96, 0.0, 0.0]; // ΔE76 = 3.04(A とは 0.04 → 同一グループ)
+        let distinct: [f32; 3] = [56.6, 0.0, 0.0]; // ΔE76 = 3.6(A とは 6.6 → 別グループ)
+        let blocks = uniform_blocks(target, 0.0, 2);
+        let config = MosaicConfig::default();
+
+        let mut pool = pool_with_tiles(&[(dup_b, 0.0, 1), (dup_a, 0.0, 2), (distinct, 0.0, 3)]);
+        let results = match_blocks(&blocks, 1, &mut pool, &config);
+        // ブロック 0: A(3.0)が最小 → A
+        assert_eq!(results[0].tile_id, 2);
+        // ブロック 1(直上 = A): D(A') = 3.04 + 0.35(グループ合計 1)+ 0.5(同一
+        // グループの隣接)= 3.89 > D(distinct) = 3.6 → distinct が選ばれる
+        assert_eq!(
+            results[1].tile_id, 3,
+            "neighbor penalty must apply to duplicates of the adjacent tile"
+        );
     }
 
     #[test]
@@ -622,18 +713,19 @@ mod tests {
     #[test]
     fn evaluate_swap_only_beyond_improve_margin() {
         // 差し替え評価(詳細設計書 4.4): 現割当より improve_margin 以上良い
-        // 候補がある場合のみ差し替える。使用回数・隣接ペナルティは再評価する
-        // (cols=2・1 行 2 ブロック。現割当は色は同じで ID の違うタイル 1 / 3 に
-        // 分けておき、現割当の隣接ペナルティが評価に混ざらない条件を作る)
+        // 候補がある場合のみ差し替える。使用回数・隣接ペナルティは再評価する。
+        // タイル 1〜3 は互いに duplicate_de 外の位置関係(別グループ)に置き、
+        // 現割当 1(ブロック 0)と 3(ブロック 1)は異なる色で隣接の影響を排除する
         let target: [f32; 3] = [50.0, 0.0, 0.0];
         let blocks = uniform_blocks(target, 0.0, 2);
-        let current: [f32; 3] = [51.0, 0.0, 0.0]; // ΔE76 = 1.0
-        let better: [f32; 3] = [50.2, 0.0, 0.0]; // ΔE76 = 0.2(改善 0.8)
+        let current_a: [f32; 3] = [51.5, 0.0, 0.0]; // ΔE76 = 1.5(タイル 1)
+        let better: [f32; 3] = [49.0, 0.0, 0.0]; // ΔE76 = 1.0(タイル 2。1 とは 2.5 → 別グループ)
+        let current_b: [f32; 3] = [50.0, 1.9, 0.0]; // ΔE76 = 1.9(タイル 3。1/2 とは別グループ)
 
-        // マージン 1.0(既定)→ 改善 0.8 では現状維持
+        // マージン 1.0(既定)→ 改善 0.5(ブロック 0)/ 0.9(ブロック 1)では現状維持
         {
             let mut pool =
-                pool_with_tiles(&[(current, 0.0, 1), (better, 0.0, 2), (current, 0.0, 3)]);
+                pool_with_tiles(&[(current_a, 0.0, 1), (better, 0.0, 2), (current_b, 0.0, 3)]);
             let mut assigned = vec![Some(1_u64), Some(3_u64)];
             let config = MosaicConfig::default();
             let swapped = evaluate_swap_range(&blocks, 2, &mut pool, &config, &mut assigned, 0, 2);
@@ -641,13 +733,13 @@ mod tests {
             assert_eq!(assigned, vec![Some(1), Some(3)]);
             assert_eq!(pool.feature(2).expect("tile 2").usage, 0);
         }
-        // マージン 0.5 → 改善 0.8 がマージンを超えるブロックのみ差し替わる。
-        // ブロック 1 は候補タイル 2 が直左(差し替え後のタイル 2)と同一になり
-        // 隣接ペナルティ + 使用ペナルティで有利にならず現状維持になる
+        // マージン 0.5 → 改善 0.5 のブロック 0 だけ差し替わる。
+        // ブロック 1 は差し替え後のタイル 2 が直左になり隣接ペナルティ +
+        // 使用ペナルティ(usage 1)で有利にならず現状維持(改善 0.4 < 0.5)。
         // (使用回数・隣接ペナルティの再評価)
         {
             let mut pool =
-                pool_with_tiles(&[(current, 0.0, 1), (better, 0.0, 2), (current, 0.0, 3)]);
+                pool_with_tiles(&[(current_a, 0.0, 1), (better, 0.0, 2), (current_b, 0.0, 3)]);
             let mut assigned = vec![Some(1_u64), Some(3_u64)];
             let config = MosaicConfig {
                 improve_margin: 0.5,
@@ -665,16 +757,15 @@ mod tests {
 
     #[test]
     fn evaluate_swap_updates_usage_for_subsequent_blocks() {
-        // 差し替えは逐次反映される: 1 ブロック目の差し替えで usage が変わり、
-        // 2 ブロック目の評価に波及する(使用ペナルティの再評価)
+        // 差し替え評価は使用ペナルティを再評価する: 候補タイル 2 は距離最小
+        // (ΔE 1.0)だが usage 3 → D = 1.0 + 1.05 = 2.05。現割当 1(ΔE 1.5、
+        // usage 0 → D = 1.5)が維持される(改善なし)。ブロック 1 でも直上の
+        // 割当(タイル 1)が両者へ与える隣接ペナルティの差で現状維持になる。
+        // タイル 1/2 は duplicate_de 外(別グループ)の位置関係に置く
         let target: [f32; 3] = [50.0, 0.0, 0.0];
-        let near: [f32; 3] = [50.0, 0.0, 0.0]; // ΔE76 = 0
-        let other: [f32; 3] = [51.0, 0.0, 0.0]; // ΔE76 = 1
+        let near: [f32; 3] = [49.0, 0.0, 0.0]; // ΔE76 = 1.0(タイル 2)
+        let other: [f32; 3] = [51.5, 0.0, 0.0]; // ΔE76 = 1.5(タイル 1。2 とは 2.5 → 別グループ)
         let blocks = uniform_blocks(target, 0.0, 2);
-        // new タイル(2)は距離最小だが usage 3 → D = 0.35*3 = 1.05。
-        // 現割当(1)は usage 0 → D = 1.0。初回評価では差し替えられない(改善なし)。
-        // 1 ブロック目でタイル 1 への差し替えが起きない場合でも、
-        // タイル 2 の usage が下がれば次ブロックの評価が変わる状況を作る
         let mut pool = pool_with_tiles(&[(other, 0.0, 1), (near, 0.0, 2)]);
         for _ in 0..3 {
             pool.bump_usage(2);
@@ -683,9 +774,8 @@ mod tests {
             improve_margin: 0.5,
             ..MosaicConfig::default()
         };
-        // 現割当はタイル 1(ΔE=1、usage 0 → D=1.0)。
-        // ブロック 0: best はタイル 2(D=1.05)→ 現割当維持。
-        // タイル 2 の usage は変わらないためブロック 1 も維持(決定的な不変性)
+        // ブロック 0: 現割当 1 の D = 1.5 < 候補 2 の D = 2.05 → 維持。
+        // ブロック 1: 直上 = 1 → D(1) = 1.5 + 0.5 = 2.0 < D(2) = 2.05(隣接なし)→ 維持
         let mut assigned = vec![Some(1_u64), Some(1_u64)];
         let swapped = evaluate_swap_range(&blocks, 1, &mut pool, &config, &mut assigned, 0, 2);
         assert!(swapped.is_empty());

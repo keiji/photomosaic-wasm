@@ -27,7 +27,7 @@
 | `p1_grid` | グリッド計算 | 時間 |
 | `p1_block_features` | ブロック特徴量算出 | 時間 |
 | `p2_tile_analyze` | タイル 1 枚の特徴量算出 | 時間(累計・最大・平均) |
-| `p2_index_build` | k-d 木構築 | 時間(構築時のみ) |
+| `p2_index_build` | プールの補助インデックス構築(k-d 木・重複グループ。詳細設計書 4.4/4.5) | 時間(構築時のみ) |
 | `p3_match_batch` | 行バッチ 1 回分のマッチング | 時間(累計・最大・平均) |
 | `p3_match_total` | マッチング全体 | 時間 |
 | `p4_compose_batch` | 行バッチ 1 回分の合成 | 時間(累計) |
@@ -63,7 +63,15 @@
         "wasm_heap_bytes": 104857600,
         "tiles_bytes": 19660800
       },
-      "config": { "block_size": 24, "w_c": 1.0, "w_d": 0.25, "alpha": 0.7 }
+      "config": {
+        "block_size": 24,
+        "w_c": 1.0,
+        "w_d": 0.25,
+        "alpha": 0.85,
+        "duplicate_de": 2.0,
+        "duplicate_detail": 4.0,
+        "row_batch": 8
+      }
     }
   ]
 }
