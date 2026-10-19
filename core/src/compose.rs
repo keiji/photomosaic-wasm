@@ -3,7 +3,11 @@
 //! - 各ブロックへ、選択タイルの合成用サムネイルをブロック矩形に
 //!   スケーリング描画する(バイリニア。補間は光学的に正しい混合となる
 //!   よう線形 RGB 空間で行う)
-//! - 色補正: タイルのトーンをブロックのトーンへ寄せる(既定 α=0.7)
+//! - 色補正: タイルのトーンをブロックのトーンへ寄せる(既定 α=0.85)。
+//!   分母の tile_mean はタイルの周囲重み付き代表色(詳細設計書 4.3 の
+//!   `mean_lab`)で、α=1 で出力の周囲重み付き平均がブロック平均と一致する。
+//!   α を強めるほどタイルの周囲(= ブロック境界に接する領域)がブロック色へ
+//!   寄り、背景の継ぎ目・粒状感(つぶつぶ)が目立たなくなる
 //!   ```text
 //!   線形 RGB 空間で: out = tile_px * ((1 - α) + α * block_mean / tile_mean)
 //!   ```
@@ -127,7 +131,9 @@ fn draw_block_cell(
     }
 
     // 色補正係数(チャンネル毎。詳細設計書 4.6):
-    // factor = (1 - α) + α * block_mean / tile_mean(tile_mean < 1/255 は 1)
+    // factor = (1 - α) + α * block_mean / tile_mean(tile_mean < 1/255 は 1)。
+    // ともに「代表色」の逆変換で、タイル側は周囲重み付き平均(詳細設計書 4.3)。
+    // α=1 で出力の周囲重み付き平均がブロック平均と一致する
     let block_linear = lab_mean_to_linear(&feature.mean_lab);
     let tile_linear = lab_mean_to_linear(&tile.mean_lab);
     let alpha = f64::from(config.color_correct);
@@ -217,7 +223,7 @@ fn lab_mean_to_linear(lab: &[f32; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tile::FEATURE_THUMB;
+    use crate::tile::{FEATURE_THUMB, TILE_BORDER_WEIGHT};
 
     fn thumb_feature_buffer(rgb: [u8; 3]) -> Vec<u8> {
         let mut arg = vec![0_u8; FEATURE_THUMB as usize * FEATURE_THUMB as usize * 4];
@@ -311,7 +317,9 @@ mod tests {
 
     #[test]
     fn color_correction_full_strength_matches_block_tone() {
-        // α=1: 出力の線形 RGB 平均がブロック平均と一致する(トーンの完全一致)
+        // α=1: 出力の線形 RGB 平均がブロック平均と一致する(トーンの完全一致)。
+        // 単色タイルでは周囲重み付き平均が全体平均と一致するため、
+        // 従来どおり「出力全体の平均」で検証できる
         let (grid, features) = uniform_grid(24, 24, 24, [90.0, -20.0, 30.0]);
         let pool = pool_with_flat_tile(1, [180, 60, 30]);
         let assignments = vec![Some(1_u64); grid.total_blocks as usize];
@@ -341,6 +349,114 @@ mod tests {
                 "channel {c}: output mean {mean_out:?} vs block mean {block_linear:?}"
             );
         }
+    }
+
+    #[test]
+    fn color_correction_tracks_tile_periphery_to_block_tone() {
+        // 詳細設計書 4.6: 分母の tile_mean はタイルの周囲重み付き代表色(4.3)。
+        // α=1 で「中央に被写体・周囲に背景」のタイルでも、出力の周囲重み付き
+        // 平均がブロック平均と一致し、周囲(= ブロック境界に接する領域)が
+        // ブロック色へ寄る。中央の被写体は暗いまま残る(モザイクの模様として保持)
+        let block_lab = crate::color::srgb8_to_lab(120, 120, 120);
+        let (grid, features) = uniform_grid(
+            24,
+            24,
+            24,
+            [
+                block_lab[0] as f32,
+                block_lab[1] as f32,
+                block_lab[2] as f32,
+            ],
+        );
+
+        // 特徴量サムネイル(32×32)・合成サムネイル(64×64)とも同一構図
+        // (中央区画が暗い被写体 40、周囲が明るい背景 220)
+        let c0 = FEATURE_THUMB / 4;
+        let c1 = FEATURE_THUMB - c0;
+        let (cz0, cz1) = (c0 as usize, c1 as usize);
+        let mut feature_arg = thumb_feature_buffer([220, 220, 220]);
+        for (i, pixel) in feature_arg.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let x = i % FEATURE_THUMB as usize;
+            let y = i / FEATURE_THUMB as usize;
+            let v = if (cz0..cz1).contains(&x) && (cz0..cz1).contains(&y) {
+                40
+            } else {
+                220
+            };
+            pixel[0] = v;
+            pixel[1] = v;
+            pixel[2] = v;
+        }
+        let mut compose_arg = thumb_compose_buffer([220, 220, 220]);
+        for (i, pixel) in compose_arg.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let x = i % 64;
+            let y = i / 64;
+            let v = if (16..48).contains(&x) && (16..48).contains(&y) {
+                40
+            } else {
+                220
+            };
+            pixel[0] = v;
+            pixel[1] = v;
+            pixel[2] = v;
+        }
+        let mut pool = TilePool::new();
+        pool.add_tile(1, &feature_arg, &compose_arg, 64, 64)
+            .expect("tile registration should succeed");
+        let assignments = vec![Some(1_u64); grid.total_blocks as usize];
+        let config = MosaicConfig {
+            color_correct: 1.0,
+            ..MosaicConfig::default()
+        };
+        let out = compose(&grid, &features, &assignments, &pool, &config);
+
+        // 出力(24×24)の周囲重み付き平均(中央区画 [6,18) は重み 1、周囲は
+        // TILE_BORDER_WEIGHT)がブロック平均(線形 RGB)と一致する
+        let lut = srgb8_linear_lut();
+        let mut weighted_sum = [0.0_f64; 3];
+        let mut total_weight = 0.0_f64;
+        for (i, pixel) in out.as_chunks::<4>().0.iter().enumerate() {
+            let x = i % 24;
+            let y = i / 24;
+            let in_center = (6..18).contains(&x) && (6..18).contains(&y);
+            let weight = if in_center { 1.0 } else { TILE_BORDER_WEIGHT };
+            for (c, slot) in weighted_sum.iter_mut().enumerate() {
+                *slot += lut[pixel[c] as usize] * weight;
+            }
+            total_weight += weight;
+        }
+        let block_xyz = lab_to_xyz(
+            f64::from(features[0].mean_lab[0]),
+            f64::from(features[0].mean_lab[1]),
+            f64::from(features[0].mean_lab[2]),
+        );
+        let block_linear = xyz_to_linear_rgb(block_xyz[0], block_xyz[1], block_xyz[2]);
+        for c in 0..3 {
+            let mean = weighted_sum[c] / total_weight;
+            assert!(
+                (mean - block_linear[c]).abs() < 0.01,
+                "channel {c}: weighted mean {mean} vs block {block_linear:?}"
+            );
+        }
+
+        // 周囲画素(コーナー)はブロック色(sRGB 120 相当)に近く、中央画素は
+        // 暗いまま(被写体の明度差は相対的に保持される)
+        let at = |x: usize, y: usize| -> u8 { out[(y * 24 + x) * 4] };
+        assert!(
+            (i32::from(at(0, 0)) - 120).abs() <= 10,
+            "corner = {}",
+            at(0, 0)
+        );
+        assert!(
+            (i32::from(at(23, 23)) - 120).abs() <= 10,
+            "corner = {}",
+            at(23, 23)
+        );
+        assert!(
+            at(12, 12) < 60,
+            "center keeps the subject dark, got {}",
+            at(12, 12)
+        );
     }
 
     #[test]
@@ -526,7 +642,7 @@ mod tests {
         assert_eq!(out.len(), 32 * 32 * 4);
         assert_eq!(
             fnv1a64(&out),
-            0xD329_0D90_D40C_2184,
+            0x2509_3387_3867_1299, // 周囲重み付き平均(tile_border_weight)の導入でマッチ・補正が変化
             "golden hash mismatch: inspect intentional spec changes and update this value"
         );
     }

@@ -230,7 +230,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
 
     it('getConfig/setConfig が往復し、範囲外はエラーになる', () => {
       const config = JSON.parse(wasm.get_config()) as Record<string, number>;
-      // f32 経由の丸め(0.7 → 0.6999999...)を許容して既定値を検証する
+      // f32 経由の丸め(0.85 → 0.8499999...)を許容して既定値を検証する
       const expected: Record<string, number> = {
         w_c: 1.0,
         w_d: 0.25,
@@ -239,7 +239,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
         identical_de: 2.0,
         improve_margin: 1.0,
         usage_cap: 4,
-        color_correct: 0.7,
+        color_correct: 0.85,
         row_batch: 8,
       };
       for (const [key, value] of Object.entries(expected)) {
@@ -263,7 +263,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
         /improve_margin/,
       );
       // 失敗した set は既存設定(既定へ復元済み)を壊さない
-      expect(JSON.parse(wasm.get_config()).color_correct).toBeCloseTo(0.7, 5);
+      expect(JSON.parse(wasm.get_config()).color_correct).toBeCloseTo(0.85, 5);
       expect(JSON.parse(wasm.get_config()).improve_margin).toBeCloseTo(1.0, 5);
       // 不正 JSON もエラー
       expect(() => wasm.set_config('{ invalid')).toThrow();
@@ -318,7 +318,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       wasm.run();
       const composed = wasm.export_main_image();
       // 合成後は原画像(全 0)ではなく色補正済みのタイル描画になる
-      // (α=0.7 → 赤タイルの R 成分が残り、G/B はゼロ除算ガードで 0 のまま)
+      // (α=0.85 → 赤タイルの R 成分が残り、G/B はゼロ除算ガードで 0 のまま)
       expect(composed.some((b) => b > 0)).toBe(true);
 
       wasm.set_block_size(12); // composed はクリア
@@ -434,7 +434,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       // 出力は変化する(右ブロックが再合成される)
       expect(Array.from(after)).not.toEqual(Array.from(before));
       // 参照検証: 現プール(タイル 1 のみ)でのフル run の出力と一致する
-      // (α=0.7 の色補正で各ブロックのトーンは保有されるため、block 単位の
+      // (α=0.85 の色補正で各ブロックのトーンは保有されるため、block 単位の
       // 色の直接比較ではなく決定的な参照出力で確認する)
       wasm.clear_tiles();
       wasm.set_main_image(redBlueMain(), 48, 24);

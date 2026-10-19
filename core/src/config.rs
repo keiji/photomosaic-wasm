@@ -31,7 +31,9 @@ pub struct MosaicConfig {
     pub improve_margin: f32,
     /// 1 タイルの最大使用回数 usage_cap。既定 4 回、0 = 無制限
     pub usage_cap: u32,
-    /// ブロック平均色へのトーン補正強度 α(color_correct)。既定 0.7、範囲 0〜1.0
+    /// ブロック平均色へのトーン補正強度 α(color_correct)。既定 0.85、範囲 0〜1.0。
+    /// 0.7 → 0.85 への引き上げは、タイル代表色の周囲重み付き平均化(詳細設計書
+    /// 4.3)と組み合わせて背景の継ぎ目・粒状感(つぶつぶ)を抑える趣旨
     pub color_correct: f32,
     /// 進捗・部分描画の行バッチ単位 row_batch。既定 8 行、範囲 4〜32
     pub row_batch: u32,
@@ -64,7 +66,7 @@ impl Default for MosaicConfig {
             identical_de: 2.0,
             improve_margin: 1.0,
             usage_cap: 4,
-            color_correct: 0.7,
+            color_correct: 0.85,
             row_batch: 8,
         }
     }
@@ -148,7 +150,7 @@ mod tests {
         assert_eq!(config.identical_de, 2.0);
         assert_eq!(config.improve_margin, 1.0);
         assert_eq!(config.usage_cap, 4);
-        assert_eq!(config.color_correct, 0.7);
+        assert_eq!(config.color_correct, 0.85);
         assert_eq!(config.row_batch, 8);
     }
 

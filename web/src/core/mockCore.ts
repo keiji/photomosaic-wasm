@@ -100,7 +100,7 @@ export function createMockCore(): CoreBridge {
     identical_de: 2.0,
     improve_margin: 1.0,
     usage_cap: 4,
-    color_correct: 0.7,
+    color_correct: 0.85,
     row_batch: 8,
   };
 

@@ -87,7 +87,7 @@ export interface MosaicConfig {
   improve_margin: number;
   /** 1 タイルの最大使用回数。既定 4、0 = 無制限 */
   usage_cap: number;
-  /** 色補正強度 α。既定 0.7、範囲 0〜1.0 */
+  /** 色補正強度 α。既定 0.85、範囲 0〜1.0(分母はタイルの周囲重み付き代表色) */
   color_correct: number;
   /** 行バッチ単位。既定 8、範囲 4〜32 */
   row_batch: number;

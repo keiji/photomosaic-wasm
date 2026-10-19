@@ -1,7 +1,11 @@
 //! タイル特徴量・タイルプール(P2 タイル解析: 詳細設計書 4.3)。
 //!
-//! - 特徴量算出はブロック(P1)と同一の手法:
-//!   線形 RGB で画素平均 → CIELAB(D65)の `mean_lab`、L* の標準偏差 `detail`
+//! - 代表色 `mean_lab`: 線形 RGB での**周囲重み付き平均** → CIELAB(D65)。
+//!   構図が「中央に被写体・周囲に背景」の写真タイルで全体平均を取ると代表色が
+//!   被写体色に引き摺られ、配置後のブロック境界(タイル同士が接する周囲領域)の
+//!   色が合わず継ぎ目・粒状感(つぶつぶ)の原因になるため、周囲(面積 75%)を
+//!   [`TILE_BORDER_WEIGHT`] 倍に重み付けする(詳細設計書 4.3)
+//! - `detail`(L* の標準偏差)はサムネイル全体で算出する(ブロック側と同一手法)
 //! - 特徴量はブロックサイズに依存しないため、ブロックサイズ変更時は P2 を再実行しない
 //!   (キャッシュ再利用。詳細設計書 4.3 の 4)
 //! - 特徴量用サムネイル(32×32)はホスト側でボックスフィルタ(面積平均)縮小して渡す。
@@ -16,6 +20,14 @@ use std::fmt;
 
 /// 特徴量算出用サムネイルの 1 辺 px(詳細設計書 5 章 feature_thumb、32×32 固定)
 pub const FEATURE_THUMB: u32 = 32;
+
+/// タイル代表色(mean_lab)の周囲重み(詳細設計書 5 章 tile_border_weight、固定 2.5)。
+///
+/// 特徴量サムネイルの中央区画(各辺の中央 1/2、面積 25%)を重み 1、周囲(面積 75%)
+/// をこの重みとして平均する(32×32 で周囲の実効シェア約 88%)。1.0 で従来の
+/// 全体平均と一致する。代表色が境界に接する周囲基準になることで、P3 のマッチングと
+/// P4 の色補正(分母も同じ代表色)が背景の継ぎ目・粒状感(つぶつぶ)を抑制する
+pub const TILE_BORDER_WEIGHT: f64 = 2.5;
 
 /// 合成用サムネイルの長辺上限 px(詳細設計書 5 章 compose_thumb_max、固定)
 pub const COMPOSE_THUMB_MAX: u32 = 64;
@@ -35,7 +47,7 @@ pub struct TileFeature {
     /// 合成用サムネイル寸法(P4 でブロック矩形へスケーリング描画する際の元)
     pub thumb_w: u32,
     pub thumb_h: u32,
-    /// CIELAB 平均 (L*, a*, b*)
+    /// CIELAB 代表色 (L*, a*, b*)(周囲重み付き平均。詳細設計書 4.3)
     pub mean_lab: [f32; 3],
     /// タイル内 L*(明度)の標準偏差(0..128)
     pub detail: f32,
@@ -47,43 +59,75 @@ pub struct TileFeature {
 ///
 /// `rgba` は R→G→B→A 順・行優先の 1 ピクセル 4 バイト。アルファは
 /// ホスト側で白背景合成済みであるため無視する(詳細設計書 4.3 の 1)。
-/// 戻り値は `(mean_lab, detail)`。計算手法はブロック特徴量(grid.rs)と同一。
-pub fn analyze_tile_feature(rgba: &[u8], width: u32, height: u32) -> ([f32; 3], f32) {
+/// `border_weight` は代表色の周囲重み(詳細設計書 5 章 tile_border_weight)。
+/// 呼び出し側は [`TILE_BORDER_WEIGHT`] を渡す(1.0 で従来の全体平均と一致)。
+/// 戻り値は `(mean_lab, detail)`。`detail` はブロック特徴量(grid.rs)と
+/// 同一の手法(サムネイル全体の L* 標準偏差)。
+pub fn analyze_tile_feature(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    border_weight: f64,
+) -> ([f32; 3], f32) {
     assert!(
         width > 0 && height > 0,
         "tile thumbnail size must be positive"
+    );
+    assert!(
+        border_weight.is_finite() && border_weight >= 1.0,
+        "border weight must be a finite number >= 1.0"
     );
     let pixel_count = usize::try_from(width).expect("width fits usize")
         * usize::try_from(height).expect("height fits usize");
     assert_eq!(rgba.len(), pixel_count * 4, "rgba buffer length mismatch");
 
+    // 代表色の中央区画(各辺の中央 1/2、面積 25%。詳細設計書 4.3):
+    // x ∈ [w/4, 3w/4) かつ y ∈ [h/4, 3h/4) を重み 1、それ以外(周囲)を
+    // border_weight として平均する
+    let width_us = usize::try_from(width).expect("width fits usize");
+    let height_us = usize::try_from(height).expect("height fits usize");
+    let center_x0 = width_us / 4;
+    let center_x1 = width_us - center_x0;
+    let center_y0 = height_us / 4;
+    let center_y1 = height_us - center_y0;
+
     let lut = srgb8_linear_lut();
-    let mut sum_linear = [0.0_f64; 3];
+    let mut sum_weighted = [0.0_f64; 3];
+    let mut total_weight = 0.0_f64;
     let mut sum_lstar = 0.0_f64;
     let mut sum_lstar_sq = 0.0_f64;
 
-    for pixel in rgba.as_chunks::<4>().0 {
+    for (i, pixel) in rgba.as_chunks::<4>().0.iter().enumerate() {
+        let x = i % width_us;
+        let y = i / width_us;
+        let in_center = (center_x0..center_x1).contains(&x) && (center_y0..center_y1).contains(&y);
+        let weight = if in_center { 1.0 } else { border_weight };
         let lr = lut[pixel[0] as usize];
         let lg = lut[pixel[1] as usize];
         let lb = lut[pixel[2] as usize];
 
-        // 線形 RGB で画素平均を取る(sRGB のまま平均しない。P1 と同一手法)
-        sum_linear[0] += lr;
-        sum_linear[1] += lg;
-        sum_linear[2] += lb;
+        // 線形 RGB で周囲重み付きの代表色平均を取る(sRGB のまま平均しない)
+        sum_weighted[0] += lr * weight;
+        sum_weighted[1] += lg * weight;
+        sum_weighted[2] += lb * weight;
+        total_weight += weight;
 
-        // detail 用: 画素ごとの L*
+        // detail 用: 画素ごとの L*(重みなし。ブロック側と同一手法)
         let lstar = linear_rgb_to_lstar(lr, lg, lb);
         sum_lstar += lstar;
         sum_lstar_sq += lstar * lstar;
     }
 
-    let n = f64::from(u32::try_from(pixel_count).expect("pixel count fits u32"));
-    let mean_linear = [sum_linear[0] / n, sum_linear[1] / n, sum_linear[2] / n];
+    let mean_linear = [
+        sum_weighted[0] / total_weight,
+        sum_weighted[1] / total_weight,
+        sum_weighted[2] / total_weight,
+    ];
     let mean_xyz = crate::color::linear_rgb_to_xyz(mean_linear[0], mean_linear[1], mean_linear[2]);
     let mean_lab = crate::color::xyz_to_lab(mean_xyz[0], mean_xyz[1], mean_xyz[2]);
 
     // detail: L* の母標準偏差(平均 L* 回りの分散。丸めによる負値は 0 にクランプ)
+    let n = f64::from(u32::try_from(pixel_count).expect("pixel count fits u32"));
     let mean_l = sum_lstar / n;
     let variance = (sum_lstar_sq / n - mean_l * mean_l).max(0.0);
 
@@ -213,7 +257,12 @@ impl TilePool {
         if feature_bytes != u64::from(FEATURE_THUMB) * u64::from(FEATURE_THUMB) * 4 {
             return Err(TilePoolError::FeatureSizeMismatch);
         }
-        let (mean_lab, detail) = analyze_tile_feature(feature_rgba, FEATURE_THUMB, FEATURE_THUMB);
+        let (mean_lab, detail) = analyze_tile_feature(
+            feature_rgba,
+            FEATURE_THUMB,
+            FEATURE_THUMB,
+            TILE_BORDER_WEIGHT,
+        );
         // 置き換えの場合は既存分を解放したうえで判定する
         let replaced_bytes = self
             .compose_thumbs
@@ -592,8 +641,13 @@ mod tests {
     #[test]
     fn uniform_tile_matches_srgb_to_lab() {
         // 単色タイル: mean_lab はその色の sRGB→Lab と一致し、detail は 0
-        let (mean_lab, detail) =
-            analyze_tile_feature(&magenta_feature(), FEATURE_THUMB, FEATURE_THUMB);
+        // (単色では周囲重み付き平均も全体平均と同じ値になる)
+        let (mean_lab, detail) = analyze_tile_feature(
+            &magenta_feature(),
+            FEATURE_THUMB,
+            FEATURE_THUMB,
+            TILE_BORDER_WEIGHT,
+        );
         let expected = srgb8_to_lab(255, 0, 255);
         assert!(close(f64::from(mean_lab[0]), expected[0], 1e-3));
         assert!(close(f64::from(mean_lab[1]), expected[1], 1e-3));
@@ -612,11 +666,14 @@ mod tests {
                 rgba.extend_from_slice(&[v, v, v, 255]);
             }
         }
-        let (mean_lab, detail) = analyze_tile_feature(&rgba, FEATURE_THUMB, FEATURE_THUMB);
+        let (mean_lab, detail) =
+            analyze_tile_feature(&rgba, FEATURE_THUMB, FEATURE_THUMB, TILE_BORDER_WEIGHT);
         // 半々の明度反転なので detail(画素ごとの L* の標準偏差)は 50 前後
         assert!(f64::from(detail) > 40.0, "detail = {detail}");
         // mean_lab は線形 RGB 平均 → Lab の結果(L*(Y=0.5) ≈ 76.07)。
-        // sRGB のまま平均した L*(= 50)とは意図的に異なる(P1 と同一手法の確認)
+        // 左右対称のパターンでは周囲も中央区画も同じ明度分布になるため、
+        // 周囲重み付き平均も同一の値になる。sRGB のまま平均した L*(= 50)とは
+        // 意図的に異なる(P1 と同一手法の確認)
         assert!(close(f64::from(mean_lab[0]), 76.07, 1.0));
     }
 
@@ -628,11 +685,87 @@ mod tests {
         for _ in 0..w * h {
             rgba.extend_from_slice(&[10, 20, 30, 255]);
         }
-        let (mean_lab, _) = analyze_tile_feature(&rgba, w, h);
+        let (mean_lab, _) = analyze_tile_feature(&rgba, w, h, TILE_BORDER_WEIGHT);
         let expected = srgb8_to_lab(10, 20, 30);
         assert!(close(f64::from(mean_lab[0]), expected[0], 1e-3));
         assert!(close(f64::from(mean_lab[1]), expected[1], 1e-3));
         assert!(close(f64::from(mean_lab[2]), expected[2], 1e-3));
+    }
+
+    /// 中央区画が暗い被写体・周囲が明るい背景の特徴量サムネイルを生成する
+    /// (中央区画 = 各辺の中央 1/2。実装の区画定義と同一の構図)
+    fn object_on_background_tile(center: u8, periphery: u8) -> Vec<u8> {
+        let c0 = FEATURE_THUMB / 4;
+        let c1 = FEATURE_THUMB - c0;
+        let mut rgba = Vec::new();
+        for y in 0..FEATURE_THUMB {
+            for x in 0..FEATURE_THUMB {
+                let in_center = (c0..c1).contains(&x) && (c0..c1).contains(&y);
+                let v = if in_center { center } else { periphery };
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        rgba
+    }
+
+    #[test]
+    fn border_weighted_mean_favors_periphery_color() {
+        // 詳細設計書 4.3: 代表色は周囲重み付き平均。「中央に被写体・周囲に背景」の
+        // 構図で、全体平均(重み 1.0)より周囲(背景)色に近い代表色を返す
+        let rgba = object_on_background_tile(40, 220);
+        let (weighted, _) =
+            analyze_tile_feature(&rgba, FEATURE_THUMB, FEATURE_THUMB, TILE_BORDER_WEIGHT);
+        let (plain, _) = analyze_tile_feature(&rgba, FEATURE_THUMB, FEATURE_THUMB, 1.0);
+
+        let center_l = srgb8_to_lab(40, 40, 40)[0];
+        let periphery_l = srgb8_to_lab(220, 220, 220)[0];
+        let plain_l = f64::from(plain[0]);
+        let weighted_l = f64::from(weighted[0]);
+        // 全体平均 < 周囲重み付き平均 < 周囲色(周囲寄りに引き上げられる)
+        assert!(
+            plain_l < weighted_l && weighted_l < periphery_l,
+            "plain L* = {plain_l}, weighted L* = {weighted_l}, periphery L* = {periphery_l}"
+        );
+        assert!(weighted_l > center_l);
+        // 周囲重み付き平均は全体平均より周囲色に近い
+        assert!((periphery_l - weighted_l).abs() < (periphery_l - plain_l).abs());
+    }
+
+    #[test]
+    fn border_weight_one_equals_plain_average() {
+        // 周囲重み 1.0 は従来の全体平均と一致する(後方互換の基準点)。
+        // 手動の線形平均 → Lab と一致することで確認する
+        let tile = golden_test_tile(FEATURE_THUMB, FEATURE_THUMB);
+        let (mean_lab, _) = analyze_tile_feature(&tile, FEATURE_THUMB, FEATURE_THUMB, 1.0);
+
+        let lut = crate::color::srgb8_linear_lut();
+        let mut sum = [0.0_f64; 3];
+        for pixel in tile.as_chunks::<4>().0 {
+            for (c, slot) in sum.iter_mut().enumerate() {
+                *slot += lut[pixel[c] as usize];
+            }
+        }
+        let n = f64::from(FEATURE_THUMB * FEATURE_THUMB);
+        let mean = [sum[0] / n, sum[1] / n, sum[2] / n];
+        let xyz = crate::color::linear_rgb_to_xyz(mean[0], mean[1], mean[2]);
+        let expected = crate::color::xyz_to_lab(xyz[0], xyz[1], xyz[2]);
+        for c in 0..3 {
+            assert!(close(f64::from(mean_lab[c]), expected[c], 1e-3));
+        }
+    }
+
+    #[test]
+    fn border_weight_rejects_invalid_values() {
+        // 重み 1.0 未満(中央重視)と非有限値は仕様外として拒否する
+        let rgba = object_on_background_tile(40, 220);
+        assert!(std::panic::catch_unwind(|| {
+            let _ = analyze_tile_feature(&rgba, FEATURE_THUMB, FEATURE_THUMB, 0.5);
+        })
+        .is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let _ = analyze_tile_feature(&rgba, FEATURE_THUMB, FEATURE_THUMB, f64::NAN);
+        })
+        .is_err());
     }
 
     #[test]
@@ -882,7 +1015,8 @@ mod tests {
     #[test]
     fn golden_hash_of_fixed_input() {
         let tile = golden_test_tile(FEATURE_THUMB, FEATURE_THUMB);
-        let (mean_lab, detail) = analyze_tile_feature(&tile, FEATURE_THUMB, FEATURE_THUMB);
+        let (mean_lab, detail) =
+            analyze_tile_feature(&tile, FEATURE_THUMB, FEATURE_THUMB, TILE_BORDER_WEIGHT);
 
         let feature = TileFeature {
             id: 7,
@@ -894,14 +1028,15 @@ mod tests {
         };
 
         // 同一入力から同一出力が得られること(決定性)
-        let (mean_lab2, detail2) = analyze_tile_feature(&tile, FEATURE_THUMB, FEATURE_THUMB);
+        let (mean_lab2, detail2) =
+            analyze_tile_feature(&tile, FEATURE_THUMB, FEATURE_THUMB, TILE_BORDER_WEIGHT);
         assert_eq!(mean_lab, mean_lab2);
         assert_eq!(detail, detail2);
 
         // ゴールデンハッシュ
         assert_eq!(
             fnv1a64(&feature_bytes(&[feature])),
-            0x52AE_599A_A020_6B5E, // M7: L* 前計算(4,096 分割)の導入で f32 格納値が丸め境界で変化
+            0x6532_E7E8_8078_7C6E, // 周囲重み付き平均(tile_border_weight)の導入で代表色が変化
             "golden hash mismatch: inspect intentional spec changes and update this value"
         );
     }
@@ -917,7 +1052,8 @@ mod tests {
         let runs = 300;
         for _ in 0..runs {
             // 計算結果が最適化で消えないよう black_box で参照する
-            let (mean_lab, detail) = analyze_tile_feature(&tile, FEATURE_THUMB, FEATURE_THUMB);
+            let (mean_lab, detail) =
+                analyze_tile_feature(&tile, FEATURE_THUMB, FEATURE_THUMB, TILE_BORDER_WEIGHT);
             std::hint::black_box(&mean_lab);
             std::hint::black_box(&detail);
         }
