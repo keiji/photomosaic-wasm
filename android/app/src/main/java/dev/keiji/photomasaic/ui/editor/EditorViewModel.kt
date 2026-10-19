@@ -150,6 +150,7 @@ data class EditorActions(
     val onToggleProgress: () -> Unit = {},
     val onStoragePermissionDenied: () -> Unit = {},
     val onDismissNotice: () -> Unit = {},
+    val onDismissMetrics: () -> Unit = {},
 )
 
 /**
@@ -235,7 +236,6 @@ class EditorViewModel(
                         preview = preview,
                         previewRevision = it.previewRevision + 1,
                         progress = null,
-                        metrics = null,
                         resultReady = false,
                     )
                 }
@@ -347,7 +347,6 @@ class EditorViewModel(
                             preview = gridPreview,
                             previewRevision = it.previewRevision + 1,
                             progress = null,
-                            metrics = null,
                             resultReady = false,
                         )
                     }
@@ -422,7 +421,6 @@ class EditorViewModel(
                             preview = preview,
                             previewRevision = it.previewRevision + 1,
                             progress = null,
-                            metrics = null,
                             resultReady = false,
                         )
                     }
@@ -534,6 +532,11 @@ class EditorViewModel(
         _uiState.update { it.copy(notice = null) }
     }
 
+    /** メトリクス表示を閉じる */
+    fun dismissMetrics() {
+        _uiState.update { it.copy(metrics = null) }
+    }
+
     /** S1 へ戻り、全状態をクリアする */
     fun reset() {
         sessionToken += 1
@@ -611,7 +614,6 @@ class EditorViewModel(
                 preview = base,
                 previewRevision = it.previewRevision + 1,
                 progress = GenerationProgressUi("match", 0f, 0f, 0, grid.totalBlocks),
-                metrics = null,
             )
         }
         generationJob =

@@ -9,7 +9,6 @@
     <string name="startup_wasm_unavailable">この端末では WebAssembly を利用できません。</string>
     <string name="startup_failed">コアの起動に失敗しました。</string>
     <string name="retry">再試行</string>
-    <string name="editor_offline">オフライン</string>
     <string name="editor_main_image_title">① メイン画像</string>
     <string name="editor_main_image_empty">メイン画像を選択してください</string>
     <string name="editor_main_image_select">メイン画像を選択</string>
@@ -54,6 +53,7 @@
     <string name="editor_phase_done">合成終了</string>
     <string name="editor_metrics_title">メトリクス</string>
     <string name="editor_metrics_copy">メトリクスをコピー</string>
+    <string name="editor_metrics_dismiss">メトリクスを閉じる</string>
     <string name="editor_metrics_empty">メトリクスはありません</string>
     <string name="editor_cancel">キャンセル</string>
     <string name="editor_tiles_required">構成画像を追加してください</string>

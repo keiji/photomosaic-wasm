@@ -194,6 +194,26 @@ class EditorViewModelTest {
             )
         }
 
+    @Test
+    fun metricsRemainUntilDismissed() =
+        runBlocking {
+            val viewModel = createViewModel(FakeImageLoader(mainBitmap, tileBitmap))
+            viewModel.setMainImage(Uri.parse("content://test/main"))
+            await { viewModel.uiState.value.grid != null }
+            viewModel.addTiles(listOf(Uri.parse("content://test/1")))
+            await { viewModel.uiState.value.tiles.size == 1 }
+            viewModel.enterEdit()
+            await { viewModel.uiState.value.resultReady && viewModel.uiState.value.metrics != null }
+
+            val revision = viewModel.uiState.value.previewRevision
+            viewModel.setMainImage(Uri.parse("content://test/main"))
+            await { viewModel.uiState.value.previewRevision > revision }
+            assertTrue(viewModel.uiState.value.metrics != null)
+
+            viewModel.dismissMetrics()
+            assertTrue(viewModel.uiState.value.metrics == null)
+        }
+
     private fun createViewModel(
         loader: ImageLoader,
         progressPreferences: ProgressPreferences = FakeProgressPreferences(),

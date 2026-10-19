@@ -54,7 +54,6 @@ function requireElement<T extends HTMLElement>(selector: string): T {
 
 function applyMessages(): void {
   requireElement<HTMLElement>('#app-title').textContent = messages.appTitle;
-  requireElement<HTMLElement>('#offline-badge').textContent = messages.offlineBadge;
   requireElement<HTMLElement>('#main-drop-hint').textContent = messages.mainDropHint;
   requireElement<HTMLElement>('#tile-heading').textContent = messages.tileHeading;
   requireElement<HTMLElement>('#tile-drop-hint').textContent = messages.tileDropHint;

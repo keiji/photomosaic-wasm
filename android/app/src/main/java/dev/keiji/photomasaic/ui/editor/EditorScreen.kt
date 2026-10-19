@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -35,7 +34,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -99,6 +97,7 @@ fun EditorRoute(
                 onToggleProgress = viewModel::toggleProgress,
                 onStoragePermissionDenied = viewModel::storagePermissionDenied,
                 onDismissNotice = viewModel::dismissNotice,
+                onDismissMetrics = viewModel::dismissMetrics,
             ),
         modifier = modifier,
     )
@@ -301,7 +300,7 @@ private fun EditContent(
             ConfigControls(config = config, actions = actions)
         }
         ProgressPanel(state = state, actions = actions)
-        state.metrics?.let { MetricsPanel(it) }
+        state.metrics?.let { MetricsPanel(it, actions.onDismissMetrics) }
         TilesCard(
             state = state,
             showAllTiles = showAllTiles,
@@ -534,9 +533,13 @@ private fun ProgressPanel(
 }
 
 @Composable
-private fun MetricsPanel(metrics: MetricsUi) {
+private fun MetricsPanel(
+    metrics: MetricsUi,
+    onDismiss: () -> Unit,
+) {
     val context = LocalContext.current
     val copyLabel = stringResource(R.string.editor_metrics_copy)
+    val dismissLabel = stringResource(R.string.editor_metrics_dismiss)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -567,6 +570,12 @@ private fun MetricsPanel(metrics: MetricsUi) {
                 contentDescription = copyLabel,
             )
         }
+        IconButton(onClick = onDismiss) {
+            Icon(
+                painter = painterResource(R.drawable.ic_close),
+                contentDescription = dismissLabel,
+            )
+        }
     }
 }
 
@@ -586,27 +595,11 @@ private fun ResultActions(
 
 @Composable
 private fun EditorHeader() {
-    Row(
+    Text(
+        text = stringResource(R.string.app_name),
+        style = MaterialTheme.typography.headlineSmall,
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = stringResource(R.string.app_name),
-            style = MaterialTheme.typography.headlineSmall,
-            modifier = Modifier.weight(1f),
-        )
-        Surface(
-            color = MaterialTheme.colorScheme.secondaryContainer,
-            shape = CircleShape,
-        ) {
-            Text(
-                text = stringResource(R.string.editor_offline),
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
-    }
+    )
 }
 
 @Composable

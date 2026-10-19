@@ -5,6 +5,7 @@
  * - コアの getMetrics() 結果の直近 run のフェーズ所要・バッチ最大所要・
  *   メモリを常時表示する
  * - 表示内容の右側にコピーアイコンを置き、metrics JSON をクリップボードへコピーする
+ * - × ボタンで閉じるまで表示を維持する(次回の計測更新で再表示する)
  */
 import { messages } from '../i18n/messages';
 import type { MetricsRun } from '../core/types';
@@ -13,6 +14,9 @@ const OVERLAY_ID = 'metrics-overlay';
 
 const COPY_ICON =
   '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>';
+
+const CLOSE_ICON =
+  '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="currentColor"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
 
 export class MetricsOverlay {
   private readonly element: HTMLElement | null = null;
@@ -45,24 +49,38 @@ export class MetricsOverlay {
       const text = document.createElement('span');
       text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;';
 
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'metrics-copy';
-      button.title = messages.metricsCopyLabel;
-      button.setAttribute('aria-label', messages.metricsCopyLabel);
-      button.disabled = true;
-      button.innerHTML = COPY_ICON;
-      button.addEventListener('click', () => {
+      const copyButton = document.createElement('button');
+      copyButton.type = 'button';
+      copyButton.className = 'metrics-copy';
+      copyButton.title = messages.metricsCopyLabel;
+      copyButton.setAttribute('aria-label', messages.metricsCopyLabel);
+      copyButton.disabled = true;
+      copyButton.style.cssText =
+        'pointer-events:auto;border:0;background:transparent;color:inherit;padding:0;cursor:pointer;';
+      copyButton.innerHTML = COPY_ICON;
+      copyButton.addEventListener('click', () => {
         void this.copy();
       });
 
-      row.append(text, button);
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'metrics-close';
+      closeButton.title = messages.metricsCloseLabel;
+      closeButton.setAttribute('aria-label', messages.metricsCloseLabel);
+      closeButton.style.cssText =
+        'pointer-events:auto;border:0;background:transparent;color:inherit;padding:0;cursor:pointer;';
+      closeButton.innerHTML = CLOSE_ICON;
+      closeButton.addEventListener('click', () => {
+        this.dismiss();
+      });
+
+      row.append(text, copyButton, closeButton);
       element.append(row);
       element.hidden = true;
       document.body.append(element);
       this.element = element;
       this.textElement = text;
-      this.copyButton = button;
+      this.copyButton = copyButton;
     }
   }
 
@@ -101,6 +119,13 @@ export class MetricsOverlay {
     if (this.copyButton) {
       this.copyButton.disabled = true;
     }
+    if (this.element) {
+      this.element.hidden = true;
+    }
+  }
+
+  /** × ボタンで閉じる。次回の update で新しい計測結果を表示する */
+  private dismiss(): void {
     if (this.element) {
       this.element.hidden = true;
     }

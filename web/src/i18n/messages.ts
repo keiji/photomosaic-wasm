@@ -5,7 +5,6 @@
  */
 export const messages = {
   appTitle: 'フォトモザイク メーカー',
-  offlineBadge: 'オフライン',
   privacyNotice: '※ 画像はこの端末内でだけ処理されます',
 
   // S1 開始画面
@@ -76,6 +75,7 @@ export const messages = {
 
   // メトリクス表示
   metricsCopyLabel: 'メトリクスをコピー',
+  metricsCloseLabel: 'メトリクスを閉じる',
 
   // エラー(インライン表示)
   errorInvalidFile: '対応していないファイル形式です(画像ファイルを指定してください)',

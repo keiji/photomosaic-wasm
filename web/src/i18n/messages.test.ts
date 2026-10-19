@@ -14,4 +14,9 @@ describe('進捗フェーズ文言', () => {
     expect(phaseLabelFor('match')).toBe(messages.phaseMatch);
     expect(phaseLabelFor('compose')).toBe(messages.phaseCompose);
   });
+
+  it('オフラインバッジ文言を持たず、メトリクスを閉じる文言を持つ', () => {
+    expect('offlineBadge' in messages).toBe(false);
+    expect(messages.metricsCloseLabel).toBe('メトリクスを閉じる');
+  });
 });
