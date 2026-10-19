@@ -127,7 +127,7 @@
   - コア: `metrics.rs`(スパン計測・`getMetrics` JSON。handoff/05 §4 スキーマ準拠)、
     `kdtree.rs`(タイル > 2,000 枚で重み付き近傍上位 32 件に絞り、使用/隣接ペナルティを含む
     完全距離で再評価)、メモリガードのサムネイル長辺自動半減(下限 16 px)、
-    開発オーバーレイ(`web/src/ui/metricsOverlay.ts`。本番ビルドでは生成されない)、
+    メトリクスオーバーレイ(`web/src/ui/metricsOverlay.ts`。本番ビルドでも表示)、
     Service Worker(`web/public/sw.js`)による 2 回目以降の完全オフライン化、
     巨大画像(長辺 4,096 px 超)の自動縮小案内
   - 実測: handoff/05 §9 に記録(S-mid の全目標達成: P1 100 / P2 40 / P3 385 / P4 700 /

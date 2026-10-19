@@ -1,9 +1,8 @@
 /**
- * 開発ビルド限定のメトリクスオーバーレイ(M7: handoff/05 §6 開発中オーバーレイ)。
+ * メトリクスオーバーレイ(M7: handoff/05 §6)。
  *
- * - import.meta.env.PROD では生成しない(本番には表示されない)
  * - コアの getMetrics() 結果の直近 run のフェーズ所要・バッチ最大所要・
- *   メモリを常時表示する
+ *   メモリを表示する
  * - 表示内容の右側にコピーアイコンを置き、metrics JSON をクリップボードへコピーする
  * - × ボタンで閉じるまで表示を維持する(次回の計測更新で再表示する)
  */
@@ -26,62 +25,60 @@ export class MetricsOverlay {
   private clipboardText = '';
 
   constructor(document: Document) {
-    if (!import.meta.env.PROD) {
-      const element = document.createElement('aside');
-      element.id = OVERLAY_ID;
-      element.style.cssText = [
-        'position:fixed',
-        'right:8px',
-        'bottom:8px',
-        'z-index:2147483647',
-        'padding:6px 8px',
-        'font:11px/1.5 ui-monospace, monospace',
-        'color:#e6e6e6',
-        'background:rgba(20,20,20,0.82)',
-        'border-radius:6px',
-        'pointer-events:none',
-        'max-width:min(92vw,720px)',
-      ].join(';');
+    const element = document.createElement('aside');
+    element.id = OVERLAY_ID;
+    element.style.cssText = [
+      'position:fixed',
+      'right:8px',
+      'bottom:8px',
+      'z-index:2147483647',
+      'padding:6px 8px',
+      'font:11px/1.5 ui-monospace, monospace',
+      'color:#e6e6e6',
+      'background:rgba(20,20,20,0.82)',
+      'border-radius:6px',
+      'pointer-events:none',
+      'max-width:min(92vw,720px)',
+    ].join(';');
 
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:flex-start;gap:6px;';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:flex-start;gap:6px;';
 
-      const text = document.createElement('span');
-      text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;';
+    const text = document.createElement('span');
+    text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;';
 
-      const copyButton = document.createElement('button');
-      copyButton.type = 'button';
-      copyButton.className = 'metrics-copy';
-      copyButton.title = messages.metricsCopyLabel;
-      copyButton.setAttribute('aria-label', messages.metricsCopyLabel);
-      copyButton.disabled = true;
-      copyButton.style.cssText =
-        'pointer-events:auto;border:0;background:transparent;color:inherit;padding:0;cursor:pointer;';
-      copyButton.innerHTML = COPY_ICON;
-      copyButton.addEventListener('click', () => {
-        void this.copy();
-      });
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'metrics-copy';
+    copyButton.title = messages.metricsCopyLabel;
+    copyButton.setAttribute('aria-label', messages.metricsCopyLabel);
+    copyButton.disabled = true;
+    copyButton.style.cssText =
+      'pointer-events:auto;border:0;background:transparent;color:inherit;padding:0;cursor:pointer;';
+    copyButton.innerHTML = COPY_ICON;
+    copyButton.addEventListener('click', () => {
+      void this.copy();
+    });
 
-      const closeButton = document.createElement('button');
-      closeButton.type = 'button';
-      closeButton.className = 'metrics-close';
-      closeButton.title = messages.metricsCloseLabel;
-      closeButton.setAttribute('aria-label', messages.metricsCloseLabel);
-      closeButton.style.cssText =
-        'pointer-events:auto;border:0;background:transparent;color:inherit;padding:0;cursor:pointer;';
-      closeButton.innerHTML = CLOSE_ICON;
-      closeButton.addEventListener('click', () => {
-        this.dismiss();
-      });
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'metrics-close';
+    closeButton.title = messages.metricsCloseLabel;
+    closeButton.setAttribute('aria-label', messages.metricsCloseLabel);
+    closeButton.style.cssText =
+      'pointer-events:auto;border:0;background:transparent;color:inherit;padding:0;cursor:pointer;';
+    closeButton.innerHTML = CLOSE_ICON;
+    closeButton.addEventListener('click', () => {
+      this.dismiss();
+    });
 
-      row.append(text, copyButton, closeButton);
-      element.append(row);
-      element.hidden = true;
-      document.body.append(element);
-      this.element = element;
-      this.textElement = text;
-      this.copyButton = copyButton;
-    }
+    row.append(text, copyButton, closeButton);
+    element.append(row);
+    element.hidden = true;
+    document.body.append(element);
+    this.element = element;
+    this.textElement = text;
+    this.copyButton = copyButton;
   }
 
   /** run の計測結果を更新する(直近 run の 1 行サマリ)。データが無ければ隠す */
@@ -89,7 +86,7 @@ export class MetricsOverlay {
     const element = this.element;
     const textElement = this.textElement;
     if (!element || !textElement) {
-      return; // 本番ビルドでは何もしない
+      return;
     }
     const run = runs.at(-1);
     if (!run) {
