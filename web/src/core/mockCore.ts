@@ -97,6 +97,7 @@ export function createMockCore(): CoreBridge {
     w_d: 0.25,
     usage_penalty: 0.35,
     neighbor_penalty: 0.5,
+    neighbor_de: 8.0,
     identical_de: 2.0,
     improve_margin: 1.0,
     duplicate_de: 2.0,

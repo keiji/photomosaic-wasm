@@ -760,7 +760,7 @@ mod tests {
         assert_eq!(out.len(), 32 * 32 * 4);
         assert_eq!(
             fnv1a64(&out),
-            0x1C81_A55A_8493_95D1, // メイン画像ブレンド(main_blend)の導入で出力が変化
+            0x0BFA_5DDB_2551_DF29, // 近さペナルティ(neighbor_de)の導入でマッチが変化
             "golden hash mismatch: inspect intentional spec changes and update this value"
         );
     }

@@ -140,6 +140,8 @@ pub struct RunRecord {
     pub w_d: f32,
     pub usage_penalty: f32,
     pub neighbor_penalty: f32,
+    /// 隣接ペナルティの効く半径(nearness 計算に使用。詳細設計書 4.4)
+    pub neighbor_de: f32,
     /// 類似タイルの同一視閾値(P3 の重複グループに影響。詳細設計書 4.4)
     pub duplicate_de: f32,
     pub duplicate_detail: f32,
@@ -309,6 +311,7 @@ fn format_run_json(run: &RunRecord) -> String {
         ("main_blend", run.main_blend),
         ("duplicate_de", run.duplicate_de),
         ("duplicate_detail", run.duplicate_detail),
+        ("neighbor_de", run.neighbor_de),
         ("row_batch", run.row_batch as f32),
     ];
     for (key, value) in &numeric {
@@ -401,6 +404,7 @@ mod tests {
             w_d: 0.25,
             usage_penalty: 0.35,
             neighbor_penalty: 0.5,
+            neighbor_de: 8.0,
             duplicate_de: 2.0,
             duplicate_detail: 4.0,
             main_blend: 0.2,
@@ -426,6 +430,7 @@ mod tests {
         assert!(json.contains("\"main_blend\":0.200"));
         assert!(json.contains("\"duplicate_de\":2.000"));
         assert!(json.contains("\"duplicate_detail\":4.000"));
+        assert!(json.contains("\"neighbor_de\":8.000"));
     }
 
     #[test]

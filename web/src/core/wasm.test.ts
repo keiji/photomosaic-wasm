@@ -236,6 +236,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
         w_d: 0.25,
         usage_penalty: 0.35,
         neighbor_penalty: 0.5,
+        neighbor_de: 8.0,
         identical_de: 2.0,
         improve_margin: 1.0,
         duplicate_de: 2.0,
@@ -273,6 +274,9 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       );
       expect(() => wasm.set_config(JSON.stringify({ ...config, main_blend: 0.9 }))).toThrow(
         /main_blend/,
+      );
+      expect(() => wasm.set_config(JSON.stringify({ ...config, neighbor_de: 1.5 }))).toThrow(
+        /neighbor_de/,
       );
       // 失敗した set は既存設定(既定へ復元済み)を壊さない
       expect(JSON.parse(wasm.get_config()).color_correct).toBeCloseTo(0.85, 5);

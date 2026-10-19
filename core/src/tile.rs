@@ -184,9 +184,10 @@ impl std::error::Error for TilePoolError {}
 /// 「同一写真の複製・至近バースト」が個別の使用回数で選ばれ続け、見た目上
 /// 同じ写真が並んで使われるのを防ぐ。代表色の距離(ΔE76)が `duplicate_de`
 /// 以下かつ `detail` 差が `duplicate_detail` 以下のタイル同士を 1 グループに
-/// まとめ、使用ペナルティ・隣接ペナルティ・usage_cap のリセット判定を
-/// グループ単位で評価させる( [`TilePool::effective_usage`] / [`TilePool::same_group`] /
-/// [`TilePool::all_usage_reached`] )。
+/// まとめ、使用ペナルティと usage_cap のリセット判定をグループ単位で
+/// 評価させる( [`TilePool::effective_usage`] /
+/// [`TilePool::all_usage_reached`] )。隣接配置の抑制は同じ代表色距離を用いる
+/// 近さペナルティ(match_engine の nearness)で行う。
 ///
 /// 構築は決定的: タイルを ID 昇順に走査し、既存グループの代表(= グループ内
 /// 最小 ID)と閾値内ならそこへ参加、なければ新規グループ。A≈B・B≈C だが
@@ -208,7 +209,7 @@ struct DuplicateGroups {
 /// 長辺を自動で半減する(解像度を落として登録を続ける。詳細設計書 5 章/6 章)。
 /// 大量タイル(> kd_tree_threshold)ではマッチング候補取得に k-d 木を使う。
 /// 類似タイルの同一視グループ(詳細設計書 4.4 重複グループ)を遅延構築で保持し、
-/// 使用ペナルティ・隣接ペナルティ・usage_cap のリセット判定をグループ単位にする
+/// 使用ペナルティと usage_cap のリセット判定をグループ単位にする
 pub struct TilePool {
     features: BTreeMap<u64, TileFeature>,
     /// 合成用サムネイル(id → (幅, 高さ, RGBA))
@@ -637,15 +638,6 @@ impl TilePool {
         self.groups
             .as_ref()
             .and_then(|groups| groups.index.get(&id).copied())
-    }
-
-    /// 2 つのタイルが同一視(同じ重複グループ)されているか(詳細設計書 4.4)。
-    /// 未構築・未登録(削除済みなど)の場合は同一 ID のみ `true`(従来動作)
-    pub fn same_group(&self, a: u64, b: u64) -> bool {
-        match (self.group_of(a), self.group_of(b)) {
-            (Some(ga), Some(gb)) => ga == gb,
-            _ => a == b,
-        }
     }
 
     /// 指定 ID の使用回数(詳細設計書 4.4: 重複グループの合計使用回数)。
@@ -1091,13 +1083,17 @@ mod tests {
         pool.insert_feature_for_test(feature(3, [51.0, 0.0, 0.0], 30.0)); // detail 差 25 → 別物
         pool.insert_feature_for_test(feature(4, [70.0, 0.0, 0.0], 5.0)); // ΔE 19 → 別物
         pool.ensure_groups(2.0, 4.0);
-        assert!(pool.same_group(1, 2), "色距離 1 は同一視される");
-        assert!(!pool.same_group(1, 3), "detail 差 25 は別物");
-        assert!(!pool.same_group(2, 3));
-        assert!(!pool.same_group(1, 4), "色距離 19 は別物");
-        // 未登録 ID は同一 ID のみ true(削除済み割当の参照などの防御)
-        assert!(!pool.same_group(1, 999));
-        assert!(pool.same_group(999, 999));
+        assert_eq!(
+            pool.group_of(1),
+            pool.group_of(2),
+            "色距離 1 は同一視される"
+        );
+        assert_ne!(pool.group_of(1), pool.group_of(3), "detail 差 25 は別物");
+        assert_ne!(pool.group_of(2), pool.group_of(3));
+        assert_ne!(pool.group_of(1), pool.group_of(4), "色距離 19 は別物");
+        // 未登録 ID は None(削除済み割当の参照などの防御)
+        assert_eq!(pool.group_of(999), None);
+        assert_eq!(pool.group_of(1), Some(0), "先頭タイルは第 0 グループ");
     }
 
     #[test]
@@ -1108,9 +1104,9 @@ mod tests {
         pool.insert_feature_for_test(feature(2, [51.5, 0.0, 0.0], 0.0)); // 1 とは 1.5 → 同一視
         pool.insert_feature_for_test(feature(3, [53.0, 0.0, 0.0], 0.0)); // 2 とは 1.5 だが 1 とは 3.0 → 別
         pool.ensure_groups(2.0, 4.0);
-        assert!(pool.same_group(1, 2));
-        assert!(!pool.same_group(2, 3));
-        assert!(!pool.same_group(1, 3));
+        assert_eq!(pool.group_of(1), pool.group_of(2));
+        assert_ne!(pool.group_of(2), pool.group_of(3));
+        assert_ne!(pool.group_of(1), pool.group_of(3));
     }
 
     #[test]
@@ -1167,15 +1163,15 @@ mod tests {
         pool.insert_feature_for_test(feature(1, [50.0, 0.0, 0.0], 0.0));
         pool.insert_feature_for_test(feature(2, [50.9, 0.0, 0.0], 0.0)); // ΔE 0.9
         pool.ensure_groups(2.0, 4.0);
-        assert!(pool.same_group(1, 2));
-        // タイル追加で未構築に戻る(同一 ID のみ true の従来動作)
+        assert_eq!(pool.group_of(1), pool.group_of(2));
+        // タイル追加で未構築に戻る(group_of は None)
         pool.insert_feature_for_test(feature(4, [80.0, 0.0, 0.0], 0.0));
-        assert!(!pool.same_group(1, 2));
+        assert_eq!(pool.group_of(1), None);
         pool.ensure_groups(2.0, 4.0);
-        assert!(pool.same_group(1, 2));
+        assert_eq!(pool.group_of(1), pool.group_of(2));
         // 閾値を狭めると ΔE 0.9 は別グループになる
         pool.ensure_groups(0.5, 4.0);
-        assert!(!pool.same_group(1, 2));
+        assert_ne!(pool.group_of(1), pool.group_of(2));
     }
 
     #[test]
@@ -1187,17 +1183,21 @@ mod tests {
         pool.add_tile(2, &magenta_feature(), &compose_rgba(64, 64), 64, 64)
             .expect("add should succeed");
         pool.ensure_groups(2.0, 4.0);
-        assert!(pool.same_group(1, 2), "同一サムネイルの 2 枚は同一視される");
+        assert_eq!(
+            pool.group_of(1),
+            pool.group_of(2),
+            "同一サムネイルの 2 枚は同一視される"
+        );
         pool.add_tile(3, &magenta_feature(), &compose_rgba(64, 64), 64, 64)
             .expect("add should succeed");
-        assert!(!pool.same_group(1, 2), "追加で未構築に戻る");
+        assert_eq!(pool.group_of(1), None, "追加で未構築に戻る");
         pool.ensure_groups(2.0, 4.0);
-        assert!(pool.same_group(1, 2));
-        assert!(pool.same_group(1, 3));
+        assert_eq!(pool.group_of(1), pool.group_of(2));
+        assert_eq!(pool.group_of(1), pool.group_of(3));
         pool.remove_tile(1).expect("remove should succeed");
-        assert!(!pool.same_group(2, 3), "削除で未構築に戻る");
+        assert_eq!(pool.group_of(2), None, "削除で未構築に戻る");
         pool.ensure_groups(2.0, 4.0);
-        assert!(pool.same_group(2, 3));
+        assert_eq!(pool.group_of(2), pool.group_of(3));
     }
 
     #[test]

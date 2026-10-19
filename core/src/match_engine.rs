@@ -1,14 +1,19 @@
 //! マッチング(P3: 詳細設計書 4.4)。
 //!
 //! - 各ブロックに対し、タイルプールから距離最小のタイルを選ぶ
-//!   `D = w_c * ΔE76 + w_d * |detail差| + λ * usage + n_p * neighbor_same`
+//!   `D = w_c * ΔE76 + w_d * |detail差| + λ * usage + n_p * nearness`
 //! - 使用ペナルティの λ でタイル群を均等に散らばらせ、全タイルの使用回数が
 //!   usage_cap に達したら一括リセットする(スタック防止)
 //! - **重複グループ**(詳細設計書 4.4): 類似タイル(同一写真の複製・至近
 //!   バースト)は `duplicate_de` / `duplicate_detail` の閾値内で同一視され、
-//!   `usage` はグループ合計、`neighbor_same` は同一グループ判定、usage_cap の
-//!   リセット判定はグループ合計基準になる(見た目上同じ写真が並んで
-//!   使われるのを防ぐ)。重複がなければ全判定がタイル単位と一致する
+//!   `usage` はグループ合計、usage_cap のリセット判定はグループ合計基準に
+//!   なる(見た目上同じ写真が並んで使われるのを防ぐ)。
+//!   重複がなければ全判定がタイル単位と一致する
+//! - **近さペナルティ**: 候補タイルと直上・直左タイルの代表色距離が
+//!   `neighbor_de` 以内のとき、近いほど大きいペナルティ
+//!   (`nearness = max(0, 1 - ΔE76 / neighbor_de)`、直上・直左の最大値)を加算し、
+//!   似たタイル同士の隣接配置を抑制する。同一タイル/同一視の複製は
+//!   ΔE76 ≒ 0 で最大ペナルティに含まれる
 //! - ΔE76 < identical_de(視覚上ほぼ同一)の候補が複数ある場合は
 //!   detail が大きい方(情報量が多い方)を優先する
 //! - 走査順は「ブロック番号昇順 × タイル ID 昇順」に固定し、同一入力に対して
@@ -38,25 +43,42 @@ pub fn delta_e76(a: &[f32; 3], b: &[f32; 3]) -> f32 {
     (dl * dl + da * da + db * db).sqrt() as f32
 }
 
+/// 候補タイルと直上・直左タイルの「近さ」(詳細設計書 4.4)。
+///
+/// `nearness = max(0, 1 - ΔE76(候補, 隣接) / neighbor_de)` の直上・直左の
+/// 最大値(0.0..=1.0)。同一タイル/同一視の複製は ΔE76 ≒ 0 で 1.0(最大)、
+/// `neighbor_de` を超えると 0.0(ペナルティなし)。隣接タイルがない場合は 0.0
+fn neighbor_nearness(
+    tile: &TileFeature,
+    left: Option<&TileFeature>,
+    above: Option<&TileFeature>,
+    config: &MosaicConfig,
+) -> f32 {
+    let radius = config.neighbor_de;
+    let mut nearness = 0.0_f32;
+    for neighbor in [left, above].into_iter().flatten() {
+        let de = delta_e76(&tile.mean_lab, &neighbor.mean_lab);
+        nearness = nearness.max((1.0 - de / radius).max(0.0));
+    }
+    nearness
+}
+
 /// 1 ブロックに対する距離評価(詳細設計書 4.4 の距離関数)。
 ///
-/// `neighbor_same` は直上・直左のいずれかと同一タイルのとき `true`
-/// (ペナルティ n_p を距離へ加算する)。
+/// `neighbor_nearness` は直上・直左タイルとの近さ(0.0..=1.0)。
+/// 近いほど大きいペナルティ n_p × nearness を距離へ加算する
+/// (同一タイル/同一視の複製が隣接すると nearness ≒ 1 で最大)。
 pub fn distance(
     block: &BlockFeature,
     tile: &TileFeature,
     usage: u32,
-    neighbor_same: bool,
+    neighbor_nearness: f32,
     config: &MosaicConfig,
 ) -> f32 {
     let color_term = f64::from(config.w_c * delta_e76(&block.mean_lab, &tile.mean_lab));
     let detail_term = f64::from(config.w_d * (block.detail - tile.detail).abs());
     let usage_term = f64::from(config.usage_penalty) * f64::from(usage);
-    let neighbor_term = f64::from(if neighbor_same {
-        config.neighbor_penalty
-    } else {
-        0.0
-    });
+    let neighbor_term = f64::from(config.neighbor_penalty) * f64::from(neighbor_nearness);
     (color_term + detail_term + usage_term + neighbor_term) as f32
 }
 
@@ -122,7 +144,7 @@ pub fn match_unmatched_range(
     let block_begin = block_begin.min(block_end.min(blocks.len()));
     let block_end = block_end.min(blocks.len());
     // 重複グループを構築済みにする(遅延。プール変更・閾値変更で再構築。
-    // 以後の usage・隣接判定はグループ基準になる。詳細設計書 4.4)
+    // 以後の usage はグループ合計基準になる。詳細設計書 4.4)
     pool.ensure_groups(config.duplicate_de, config.duplicate_detail);
 
     for (i, block) in blocks.iter().enumerate().take(block_end).skip(block_begin) {
@@ -143,13 +165,18 @@ pub fn match_unmatched_range(
         } else {
             None
         };
+        // 近さペナルティ(4.4)の重ね合わせ元: 直上・直左の割当タイルの特徴量。
+        // TileFeature は Copy のため値で持ち出す(candidates_for の可変借用と
+        // 衝突させない)
+        let neighbor_left = left_id.and_then(|id| pool.feature(id).copied());
+        let neighbor_above = above_id.and_then(|id| pool.feature(id).copied());
 
         // 各タイルの距離を評価し最小を選ぶ(ID 昇順走査 → 決定的)。
         // あわせて「視覚上同一(ΔE76 < identical_de)」の候補の中で detail 最大の
         // タイルを追跡し、存在すれば距離最小より優先して選ぶ。
         // TileFeature は Copy のため値で保持し、プールの可変借用と衝突させない。
         // 大量タイル(M7)では総当たりの代わりに k-d 木の近傍上位 32 件を候補と
-        // する(usage・隣接ペナルティは候補取得後の再評価で反映する)
+        // する(usage・近さペナルティは候補取得後の再評価で反映する)
         let mut candidate_ids = pool.candidates_for(block, config);
         if candidate_ids.is_empty() {
             candidate_ids = pool.features().map(|f| f.id).collect();
@@ -159,16 +186,20 @@ pub fn match_unmatched_range(
 
         for tile in pool.features_for(&candidate_ids) {
             let de = delta_e76(&block.mean_lab, &tile.mean_lab);
-            // 隣接ペナルティは「同一グループ」判定(同一視された複製が直上・直左に
-            // あっても加算する。詳細設計書 4.4)
-            let neighbor_same = left_id.is_some_and(|l| pool.same_group(l, tile.id))
-                || above_id.is_some_and(|a| pool.same_group(a, tile.id));
+            // 近さペナルティ: 候補と直上・直左タイルの代表色距離が近いほど
+            // 大きく加算する(似たタイル同士の隣接配置を抑制。詳細設計書 4.4)
+            let nearness = neighbor_nearness(
+                &tile,
+                neighbor_left.as_ref(),
+                neighbor_above.as_ref(),
+                config,
+            );
             // 使用ペナルティはグループ合計の使用回数で評価する(4.4)
             let d = distance(
                 block,
                 &tile,
                 pool.effective_usage(tile.id),
-                neighbor_same,
+                nearness,
                 config,
             );
 
@@ -176,7 +207,7 @@ pub fn match_unmatched_range(
                 best = Some((d, tile));
             }
             if de < config.identical_de {
-                // detail 同点のときは距離(usage/隣接ペナルティ含む)で比較する。
+                // detail 同点のときは距離(usage/近さペナルティ含む)で比較する。
                 // 比較は `<` のみで行い、同点は先着(ID 小)を保持する(決定性)
                 let take_near = match near_best {
                     None => true,
@@ -244,14 +275,22 @@ pub fn evaluate_swap_range(
         } else {
             None
         };
-        // 隣接・使用ペナルティは重複グループ基準で再評価する(詳細設計書 4.4)
-        let neighbor_current = left_id.is_some_and(|l| pool.same_group(l, current_id))
-            || above_id.is_some_and(|a| pool.same_group(a, current_id));
+        // 近さペナルティ(4.4)の重ね合わせ元: 直上・直左の割当タイルの特徴量。
+        // TileFeature は Copy のため値で持ち出す(candidates_for の可変借用と衝突させない)
+        let neighbor_left = left_id.and_then(|id| pool.feature(id).copied());
+        let neighbor_above = above_id.and_then(|id| pool.feature(id).copied());
+        // 隣接・使用ペナルティは近さ・グループ合計基準で再評価する(詳細設計書 4.4)
+        let nearness_current = neighbor_nearness(
+            &current_tile,
+            neighbor_left.as_ref(),
+            neighbor_above.as_ref(),
+            config,
+        );
         let current_d = distance(
             block,
             &current_tile,
             pool.effective_usage(current_id),
-            neighbor_current,
+            nearness_current,
             config,
         );
 
@@ -270,15 +309,19 @@ pub fn evaluate_swap_range(
         }
         let mut best: Option<(f32, u64)> = None;
         for tile in pool.features_for(&candidate_ids) {
-            // 隣接ペナルティは「同一グループ」判定、使用ペナルティはグループ合計
-            // の使用回数で評価する(詳細設計書 4.4)
-            let neighbor_same = left_id.is_some_and(|l| pool.same_group(l, tile.id))
-                || above_id.is_some_and(|a| pool.same_group(a, tile.id));
+            // 近さペナルティ: 候補と直上・直左タイルの代表色距離が近いほど
+            // 大きく加算する。使用ペナルティはグループ合計の使用回数(詳細設計書 4.4)
+            let nearness = neighbor_nearness(
+                &tile,
+                neighbor_left.as_ref(),
+                neighbor_above.as_ref(),
+                config,
+            );
             let d = distance(
                 block,
                 &tile,
                 pool.effective_usage(tile.id),
-                neighbor_same,
+                nearness,
                 config,
             );
             if best.is_none_or(|(best_d, _)| d < best_d) {
@@ -339,6 +382,18 @@ mod tests {
         (0..count).map(|index| block(lab, detail, index)).collect()
     }
 
+    /// テスト用のタイル特徴量((id, mean_lab, detail) の並び)
+    fn feature(id: u64, mean_lab: [f32; 3], detail: f32) -> TileFeature {
+        TileFeature {
+            id,
+            thumb_w: 64,
+            thumb_h: 64,
+            mean_lab,
+            detail,
+            usage: 0,
+        }
+    }
+
     #[test]
     fn delta_e76_matches_manual_computation() {
         let a: [f32; 3] = [50.0, 10.0, -10.0];
@@ -362,12 +417,12 @@ mod tests {
         };
         // ΔE76 = 0、detail 差 = 6、usage 2 → 0.25*6 + 0.35*2 = 1.5 + 0.7 = 2.2
         assert!(close(
-            distance(&block, &tile_same_lab_higher_detail, 2, false, &config),
+            distance(&block, &tile_same_lab_higher_detail, 2, 0.0, &config),
             2.2
         ));
-        // 隣接ペナルティの加算(n_p = 0.5)
+        // 近さペナルティの加算(n_p = 0.5 × nearness 1.0 = 隣接タイルと同一のとき)
         assert!(close(
-            distance(&block, &tile_same_lab_higher_detail, 2, true, &config),
+            distance(&block, &tile_same_lab_higher_detail, 2, 1.0, &config),
             2.7
         ));
     }
@@ -490,8 +545,9 @@ mod tests {
 
     #[test]
     fn neighbor_penalty_flips_next_choice() {
-        // 直上と同一タイルには n_p が加算される → 近い他タイルが逆転して選ばれる。
-        // 2 枚は duplicate_de より遠い位置関係(直交方向)に置き互いに別グループにする
+        // 直上と同一タイルには最大の近さペナルティ(n_p × nearness 1.0)が加算
+        // される → 近い他タイルが逆転して選ばれる。2 枚は duplicate_de より遠い
+        // 位置関係(直交方向)に置き互いに別グループにする
         // (同一視された複製が隣接するケースは neighbor_penalty_applies_to_duplicate_group)
         let target: [f32; 3] = [53.0, 0.0, 0.0];
         let same: [f32; 3] = [50.6, 0.0, 0.0]; // ΔE76 = 2.4(identical_de・duplicate_de の外)
@@ -503,7 +559,9 @@ mod tests {
         let results = match_blocks(&blocks, 1, &mut pool, &config);
         // ブロック 0: same の距離 2.4 が最小(2.5 より近い)
         assert_eq!(results[0].tile_id, 2);
-        // ブロック 1(直上 = same): D(same) = 2.4 + 0.35 + 0.5 = 3.25 > D(other) = 2.5
+        // ブロック 1(直上 = same):
+        // D(same) = 2.4 + 0.35 + 0.5 × nearness(ΔE 0 → 1.0) = 3.25
+        // D(other) = 2.5 + 0.5 × nearness(ΔE 3.46 → 0.57) = 2.78
         assert_eq!(
             results[1].tile_id, 1,
             "neighbor penalty must flip the choice"
@@ -525,6 +583,46 @@ mod tests {
         assert_eq!(results[0].tile_id, 2);
         // ブロック 1 の直左は same(指定上、直上は存在しない)→ other が選ばれる
         assert_eq!(results[1].tile_id, 1);
+    }
+
+    #[test]
+    fn neighbor_nearness_falls_off_with_distance() {
+        // 詳細設計書 4.4 近さペナルティ: nearness は候補と隣接タイルの代表色
+        // 距離に応じて 1.0(同一)から 0.0(neighbor_de を超える)へ線形に減衰する。
+        // 直上・直左のうち近い方(大きい nearness)が採用される
+        let config = MosaicConfig::default(); // neighbor_de = 8.0
+        let tile = feature(1, [50.0, 0.0, 0.0], 0.0);
+        let same = feature(2, [50.0, 0.0, 0.0], 0.0); // ΔE 0 → 1.0
+        let near = feature(3, [54.0, 0.0, 0.0], 0.0); // ΔE 4 → 0.5
+        let edge = feature(4, [58.0, 0.0, 0.0], 0.0); // ΔE 8 → 0.0
+        let far = feature(5, [70.0, 0.0, 0.0], 0.0); // ΔE 20 → 0.0(負はクランプ)
+        let none: Option<&TileFeature> = None;
+
+        assert_eq!(
+            neighbor_nearness(&tile, Some(&same), none, &config),
+            1.0,
+            "同一タイルは最大ペナルティ"
+        );
+        assert!(
+            (neighbor_nearness(&tile, Some(&near), none, &config) - 0.5).abs() < 1e-6,
+            "ΔE 4 は半径 8 の中間値"
+        );
+        assert_eq!(
+            neighbor_nearness(&tile, Some(&edge), none, &config),
+            0.0,
+            "ΔE = neighbor_de はペナルティなし"
+        );
+        assert_eq!(
+            neighbor_nearness(&tile, Some(&far), none, &config),
+            0.0,
+            "neighbor_de を超える距離はクランプ"
+        );
+        // 直上・直左の大きい方(近い方が 1 つでもあれば最大値になる)
+        assert_eq!(
+            neighbor_nearness(&tile, Some(&far), Some(&same), &config),
+            1.0
+        );
+        assert_eq!(neighbor_nearness(&tile, none, none, &config), 0.0);
     }
 
     #[test]
@@ -552,8 +650,8 @@ mod tests {
         let mut pool = pool_with_tiles(&[(dup_a, 0.0, 1), (dup_b, 0.0, 2), (distinct, 0.0, 3)]);
         // 前提: 1 と 2 は同一視、1 と 3 は別グループ
         pool.ensure_groups(config.duplicate_de, config.duplicate_detail);
-        assert!(pool.same_group(1, 2));
-        assert!(!pool.same_group(1, 3));
+        assert_eq!(pool.group_of(1), pool.group_of(2));
+        assert_ne!(pool.group_of(1), pool.group_of(3));
 
         let results = match_blocks(&blocks, 1, &mut pool, &config);
         // ブロック 0: A(2.8)が最小 → A。ブロック 1: A は 2.8 + 0.35(グループ合計 1)、

@@ -20,9 +20,14 @@ pub struct MosaicConfig {
     pub w_d: f32,
     /// 使用回数ペナルティ係数 λ(usage_penalty)。既定 0.35、範囲 0〜1.0
     pub usage_penalty: f32,
-    /// 直上/直左と同一タイルのペナルティ n_p(neighbor_penalty、ΔE 換算)。
-    /// 既定 0.5、範囲 0〜1.0
+    /// 直上/直左と近いタイルのペナルティ n_p(neighbor_penalty、ΔE 換算)。
+    /// 既定 0.5、範囲 0〜1.0。近さの度合い(nearness)に乗じて加算する
     pub neighbor_penalty: f32,
+    /// 隣接ペナルティが効く色距離の半径 neighbor_de(ΔE76 換算)。
+    /// 既定 8.0、範囲 2〜16。候補タイルと直上・直左タイルの代表色距離がこの値
+    /// 以内のとき、近いほど大きいペナルティ(距離 0 で n_p の最大値)を加算する
+    /// (詳細設計書 4.4: 似たタイル同士の隣接配置を抑制する)
+    pub neighbor_de: f32,
     /// 「視覚上同一」とみなす ΔE76 閾値。固定(2.0)
     pub identical_de: f32,
     /// 差分再マッチ(タイル追加時)の差し替え判定マージン improve_margin。
@@ -31,8 +36,9 @@ pub struct MosaicConfig {
     pub improve_margin: f32,
     /// 類似タイルの同一視閾値 duplicate_de(ΔE76 換算)。既定 2.0、範囲 0.5〜8.0。
     /// 代表色の距離がこの値以下のタイル同士は「重複グループ」にまとめられ、
-    /// 使用ペナルティ・隣接ペナルティ・usage_cap のリセット判定がグループ単位に
-    /// なる(同一写真の複製・至近バーストが個別の usage で使われ続けるのを防ぐ)
+    /// 使用ペナルティと usage_cap のリセット判定がグループ単位になる
+    /// (同一写真の複製・至近バーストが個別の usage で使われ続けるのを防ぐ)。
+    /// 隣接配置の抑制は duplicate_de とは別の neighbor_de(近さペナルティ)で行う
     pub duplicate_de: f32,
     /// 類似タイルの同一視閾値 duplicate_detail(detail 差)。既定 4.0、範囲 0〜32。
     /// duplicate_de と併せて満たすときだけ同一視する(同色でも平坦/複雑は別物)
@@ -76,6 +82,7 @@ impl Default for MosaicConfig {
             w_d: 0.25,
             usage_penalty: 0.35,
             neighbor_penalty: 0.5,
+            neighbor_de: 8.0,
             identical_de: 2.0,
             improve_margin: 1.0,
             duplicate_de: 2.0,
@@ -121,6 +128,13 @@ impl MosaicConfig {
             1.0,
             "neighbor_penalty",
             "must be in 0.0..=1.0",
+        )?;
+        finite_in_range(
+            self.neighbor_de,
+            2.0,
+            16.0,
+            "neighbor_de",
+            "must be in 2.0..=16.0",
         )?;
         if !(self.identical_de.is_finite() && self.identical_de > 0.0) {
             return Err(ConfigError {
@@ -184,6 +198,7 @@ mod tests {
         assert_eq!(config.w_d, 0.25);
         assert_eq!(config.usage_penalty, 0.35);
         assert_eq!(config.neighbor_penalty, 0.5);
+        assert_eq!(config.neighbor_de, 8.0);
         assert_eq!(config.identical_de, 2.0);
         assert_eq!(config.improve_margin, 1.0);
         assert_eq!(config.duplicate_de, 2.0);
@@ -253,6 +268,13 @@ mod tests {
             ),
             (
                 MosaicConfig {
+                    neighbor_de: 1.9,
+                    ..MosaicConfig::default()
+                },
+                "neighbor_de",
+            ),
+            (
+                MosaicConfig {
                     duplicate_de: 0.4,
                     ..MosaicConfig::default()
                 },
@@ -287,6 +309,7 @@ mod tests {
             w_d: 0.0,
             usage_penalty: 1.0,
             neighbor_penalty: 0.0,
+            neighbor_de: 2.0,
             identical_de: f32::MIN_POSITIVE,
             improve_margin: 0.5,
             duplicate_de: 0.5,
@@ -302,6 +325,7 @@ mod tests {
             improve_margin: 2.0,
             duplicate_de: 8.0,
             duplicate_detail: 32.0,
+            neighbor_de: 16.0,
             main_blend: 0.8,
             row_batch: 4,
             ..MosaicConfig::default()

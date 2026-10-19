@@ -79,8 +79,10 @@ export interface MosaicConfig {
   w_d: number;
   /** 使用回数ペナルティ係数 λ。既定 0.35、範囲 0〜1.0 */
   usage_penalty: number;
-  /** 直上/直左と同一タイルのペナルティ n_p。既定 0.5、範囲 0〜1.0 */
+  /** 直上/直左と近いタイルのペナルティ n_p。既定 0.5、範囲 0〜1.0(近さは neighbor_de 基準) */
   neighbor_penalty: number;
+  /** 隣接ペナルティが効く色距離の半径(ΔE76 換算)。既定 8.0、範囲 2〜16 */
+  neighbor_de: number;
   /** 「視覚上同一」とみなす ΔE76 閾値(固定 2.0) */
   identical_de: number;
   /** 差分再マッチ(タイル追加時)の差し替え判定マージン。既定 1.0、範囲 0.5〜2.0 */

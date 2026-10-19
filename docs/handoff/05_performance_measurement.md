@@ -71,6 +71,7 @@
         "main_blend": 0.2,
         "duplicate_de": 2.0,
         "duplicate_detail": 4.0,
+        "neighbor_de": 8.0,
         "row_batch": 8
       }
     }
