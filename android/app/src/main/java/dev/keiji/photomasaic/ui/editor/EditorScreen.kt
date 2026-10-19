@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -59,6 +61,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.keiji.photomasaic.R
 import dev.keiji.photomasaic.core.CoreEngine
 import dev.keiji.photomasaic.core.MosaicConfig
+import dev.keiji.photomasaic.io.MAX_BLOCK_SIZE
+import dev.keiji.photomasaic.io.MIN_BLOCK_SIZE
 import java.text.NumberFormat
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -78,7 +82,7 @@ fun EditorRoute(
         actions =
             EditorActions(
                 onMainImageSelected = viewModel::setMainImage,
-                onTilesSelected = viewModel::addTiles,
+                onTilesSelected = { uris, limitReached -> viewModel.addTiles(uris, limitReached) },
                 onRemoveTile = viewModel::removeTile,
                 onStartEdit = viewModel::enterEdit,
                 onBack = viewModel::reset,
@@ -115,11 +119,26 @@ fun EditorScreen(
             uri?.let(actions.onMainImageSelected)
         }
     val tilesPicker =
-        rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
-            actions.onTilesSelected(uris)
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.PickMultipleVisualMedia(MAX_TILES_PER_PICK),
+        ) { uris ->
+            actions.onTilesSelected(uris, uris.size >= MAX_TILES_PER_PICK)
         }
     val imageOnly = PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
     var showAllTiles by rememberSaveable { mutableStateOf(false) }
+    var showResetDialog by rememberSaveable { mutableStateOf(false) }
+    val hasLoadedImages = state.mainImage != null || state.tiles.isNotEmpty()
+    val requestBack = {
+        if (hasLoadedImages) {
+            showResetDialog = true
+        } else {
+            actions.onBack()
+        }
+    }
+
+    BackHandler(enabled = hasLoadedImages && !showResetDialog) {
+        showResetDialog = true
+    }
 
     if (state.screen == EditorStage.Start) {
         StartContent(
@@ -138,8 +157,32 @@ fun EditorScreen(
             onShowAllTiles = { showAllTiles = true },
             onSelectMain = { mainPicker.launch(imageOnly) },
             onAddTiles = { tilesPicker.launch(imageOnly) },
+            onBack = requestBack,
             actions = actions,
             modifier = modifier,
+        )
+    }
+
+    if (showResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDialog = false },
+            title = { Text(text = stringResource(R.string.editor_reset_confirm_title)) },
+            text = { Text(text = stringResource(R.string.editor_reset_confirm_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showResetDialog = false
+                        actions.onBack()
+                    },
+                ) {
+                    Text(text = stringResource(R.string.editor_reset_confirm_ok))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetDialog = false }) {
+                    Text(text = stringResource(R.string.editor_reset_confirm_cancel))
+                }
+            },
         )
     }
 }
@@ -169,6 +212,7 @@ private fun StartContent(
             main = state.mainImage,
             onSelect = onSelectMain,
         )
+        state.blockSizeAdjustedTo?.let { AutoBlockSizeNotice(it) }
         SectionTitle(stringResource(R.string.editor_tiles_title))
         TilesCard(
             state = state,
@@ -196,6 +240,7 @@ private fun EditContent(
     onShowAllTiles: () -> Unit,
     onSelectMain: () -> Unit,
     onAddTiles: () -> Unit,
+    onBack: () -> Unit,
     actions: EditorActions,
     modifier: Modifier,
 ) {
@@ -243,7 +288,7 @@ private fun EditContent(
         EditToolbar(
             canSave = state.resultReady && !state.saving,
             saving = state.saving,
-            onBack = actions.onBack,
+            onBack = onBack,
             onSave = saveWithPermission,
         )
         PreviewCard(
@@ -251,6 +296,7 @@ private fun EditContent(
             onChangeMainImage = onSelectMain,
         )
         BlockSizeControl(state = state, actions = actions)
+        state.blockSizeAdjustedTo?.let { AutoBlockSizeNotice(it) }
         state.config?.let { config ->
             ConfigControls(config = config, actions = actions)
         }
@@ -592,6 +638,15 @@ private fun ErrorText(error: EditorError) {
 }
 
 @Composable
+private fun AutoBlockSizeNotice(blockSize: Int) {
+    Text(
+        text = stringResource(R.string.editor_block_size_adjusted, blockSize),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.tertiary,
+    )
+}
+
+@Composable
 private fun NoticeText(notice: EditorNotice) {
     val text =
         when (notice) {
@@ -637,8 +692,6 @@ private fun CoreVersionText(coreVersion: String) {
 
 private fun formatCount(value: Int): String = NumberFormat.getIntegerInstance(Locale.US).format(value)
 
-private const val MIN_BLOCK_SIZE = 8
-private const val MAX_BLOCK_SIZE = 128
 private const val MAX_MAIN_BLEND = 0.8f
 private const val MIN_DUPLICATE_DE = 0.5f
 private const val MAX_DUPLICATE_DE = 8.0f

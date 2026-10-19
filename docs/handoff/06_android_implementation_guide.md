@@ -91,7 +91,7 @@ control メッセージの種別は、詳細設計書 2 章で凍結した論理
 - MessagePort 経路: Kotlin → JS は named data が使える場合 `provideNamedData` で渡し、メッセージには `dataRef` のみを含める。named data が無い場合は `inputBegin` の後に ArrayBuffer を MessagePort で送る。JS → Kotlin は JSON の直後に 512 KiB 以下の ArrayBuffer チャンクを複数送り、`length` に達した時点で完了とする。
 - named data + evaluate 経路: 入力は `provideNamedData`、出力は `evaluateJavaScriptAsync("__pmDrain()")` のポーリングで受ける。JS は応答・進捗・バイナリを outbox に積み、バイナリは 512 KiB 単位の Base64 チャンクにする。
 - Base64 evaluate 経路: named data も MessagePort も使わない場合。入力は `inputBegin` + `inputChunk`、出力は named data + evaluate 経路と同じ outbox / Base64 チャンクを使う。
-- evaluate 経路の制御は `__pmHandleControl("<JSON>")`、受信は `__pmDrain()` を 16〜50ms 間隔でポーリングする。`stepDone` を受けたら `step` を送る。
+- evaluate 経路の制御は `__pmHandleControl("<JSON>")`、受信は `__pmDrain()` を処理中 16ms 間隔でポーリングし、アイドル時は停止する(A4-08)。`stepDone` を受けたら `step` を送る。
 - 正確な API 名・サイズ上限は androidx.javascriptengine の公式ドキュメントを正とし、A0/A2-2 で実機確認の上、本書と詳細設計書へ反映する。
 - S2 の操作(ブロックサイズスライダー・タイル追加/削除の差分再マッチ・設定変更)を UI 仕様どおりに成立させるため、control 種別は凍結論理 API と同一の一式を用意する。進捗・部分結果の通知はバッチ駆動(`begin_run` / `step_run`)をホスト JS 内で担い、`step_run` の戻り値(progress / result)をメッセージへ変換する。サンドボックスに `setTimeout` が無いため、バッチ境界は `stepDone` → `step` の往復で作る。
 - タイル一括登録(`addTiles`)は `{type: "addTiles", tiles: [{tileId, featureRef, composeRef, meta}]}` を 1 回送り、JS 側で `wasm_bindgen.add_tile` を順に呼ぶ。応答は `{tiles: [...], errors: ["tile 3: ..."]}` とし、成功分と失敗理由を分けて返す。Kotlin はデコード済みのタイルをまとめて渡し、部分成功時も成功分を UI に反映する。
@@ -123,7 +123,7 @@ control メッセージの種別は、詳細設計書 2 章で凍結した論理
 ### 5.1 メディアピッカー
 
 - メイン画像: `ActivityResultContracts.PickVisualMedia`(単一選択)
-- 構成画像: `PickMultipleVisualMedia(maxItems)`(上限はストレージガイドに合わせ調整。超える場合は複数回の追加を案内)
+- 構成画像: `PickMultipleVisualMedia(maxItems)`。Android 実装は 100 枚を上限とし、上限に達した場合は複数回の追加を案内する。
 - 権限不要(Photo Picker はメディアへの部分アクセスを OS が仲介する)
 
 ### 5.2 デコード(Kotlin 側)
@@ -172,6 +172,7 @@ progress.collectAsState().value.let { event ->
 - バッチ駆動(`assets/host/host.js`): サンドボックスに `setTimeout` が無いため、`begin_run` / `begin_rematch` 後の 1 バッチごとに `stepDone` を送り、Kotlin が `step` を返すハンドシェイクでバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。進捗は `progress`、部分結果は `batchDone` + バイナリ、完成は `result` + バイナリとして送る。
 - 部分描画: `batchDone` の行範囲をグリッド全体の Bitmap へ `Canvas.drawBitmap` で転写し、`previewRevision` で Compose の再描画を促す。完成時は完成 RGBA を Bitmap 化して保存・共有に使う。
 - S2 UI(`ui/editor/EditorScreen.kt` / `EditorViewModel.kt`): プレビュー(タップでメイン画像変更)、ブロックサイズ(8〜128px、300ms デバウンス)、メイン画像ブレンド(0〜0.8)、色補正(0〜1.0)、重複閾値(0.5〜8.0)、進捗バー(割当/全体・フェーズ・開閉)、キャンセル、構成画像の追加/削除(編集中は差分再マッチ)、保存/共有、戻る(全状態クリア)を実装した。保存は完成時のみ有効。API 26〜28 では保存前に `WRITE_EXTERNAL_STORAGE` を要求する。生成完了時はフェーズを「合成終了」に切り替え、直近 run のメトリクスサマリとコピーアイコンを表示する。
+- A4-08 の UX 改善: 進捗開閉状態を SharedPreferences に保存し、画像読み込み後の戻る操作ではリセット確認を表示する。Photo Picker は 100 枚上限で分割追加を案内し、小画像ではブロックサイズを自動調整する(§8.5)。
 - コア共有(`MainActivity.kt` / `StartupViewModel.kt`): 起動検査と編集画面で同一の `JsCoreEngine` を Activity スコープの `StartupViewModel` 経由で共有し、画面遷移でサンドボックスを作り直さない。
 - 検証: `compileDebugKotlin` / `compileDebugAndroidTestKotlin` / `detekt` / `ktlint` / `lintDebug` / ユニットテスト 13 件が成功。実機テストは 15 件中 14 件成功・1 件スキップ(A2 時点)。スキップした `JsCoreEngineTest` は、検証用エミュレータの WebView 133/134 が `JS_FEATURE_MESSAGE_PORTS` を公開しないため `Assume` でスキップした。A2-2 でスキップを解除し、named data + evaluate フォールバック経路で生成できることを確認した(§6.2)。
 - 既知の制約: MessagePort 非対応端末では evaluate フォールバックを使うため、MessagePort 経路より転送コストが大きい。Base64 evaluate 経路はさらに転送コストが大きい。
@@ -184,7 +185,7 @@ progress.collectAsState().value.let { event ->
   2. MessagePort が無い場合は named data + evaluate 経路。入力は `provideNamedData`、出力は `__pmDrain()` のポーリングで受ける。
   3. named data も無い場合は Base64 evaluate 経路。入力は `inputBegin` / `inputChunk`、出力は Base64 チャンクで受ける。
 - MessagePort の機能フラグが true でも `createMessageChannel` が失敗する端末があるため、例外時は named data + evaluate へ落とす。
-- evaluate 経路は `__pmHandleControl(json)` で制御を送り、JS の outbox を `__pmDrain()` で 16ms(処理中)/50ms(待機中)間隔でポーリングする。`batchDone` / `result` / binary response には `length` を付け、512 KiB 単位の Base64 チャンクが揃った時点で完了とする。
+- evaluate 経路は `__pmHandleControl(json)` で制御を送り、JS の outbox を `__pmDrain()` で 16ms(処理中)間隔でポーリングする。未処理の要求・生成がない間はポーラーを停止し、次の `post` / `generate` で再開する(A4-08、§8.5)。`batchDone` / `result` / binary response には `length` を付け、512 KiB 単位の Base64 チャンクが揃った時点で完了とする。
 - 検証環境の WebView 機能値(android-36 エミュレータ、WebView 133): `wasm=true`, `messagePort=false`, `provideNamedData=true`, `promise=true`, `evaluateWithoutTransactionLimit=true`, `isolateMaxHeap=true`。このため実機テストは named data + evaluate 経路で実行した。
 - 検証: `JsCoreEngineTest` のスキップを解除し、`start` → `setMainImage` → `getBlockMeanColors` → `addTile` → `run` → `Completed` が成功。Node.js 上では実 `.wasm` を使い、MessagePort + named data / MessagePort + ArrayBuffer 入力 / named data + evaluate / Base64 evaluate の 4 経路を検証した(`/tmp/opencode/host_real_core_test.js`, `host_messageport_binaryinput_test.js`, `host_fallback_test.js`, `host_string_fallback_test.js`)。`detekt` / `ktlint` も成功。
 - 既知の制約: Base64 evaluate 経路は Binder のトランザクション上限を避けるため 512 KiB チャンクに分割する。`EVALUATE_WITHOUT_TRANSACTION_LIMIT` が無い端末でも、このチャンクサイズ(Base64 後 約 683 KiB)は 1 MiB 未満に収まる。非常に大きな画像では転送時間が増える。
@@ -279,7 +280,7 @@ A4 は本書をフィードバックの正本として運用する。新しい�
 | A4-05 | 低メモリ実機での S-large(12MP・2,000 枚)が未検証 | QA | - | P2 | 2GB 級実機で生成完了と安全な失敗を確認する | Open |
 | A4-06 | Display P3 などの広色域入力の正規化が未検証 | SPEC / QA | 未確認 | P2 | P3 画像を Web / Android で比較し、sRGB 変換ルールを仕様化する | Open |
 | A4-07 | プロセス死後に編集状態を復元しない(起動画面から再初期化) | SPEC | - | P3 | 再初期化で許容するか、`SavedStateHandle` 等で復元するかを決定する | Open |
-| A4-08 | evaluate ポーラーがアイドル時も 16 / 50ms 間隔で動作する | HOST | - | P3 | アイドル時の停止・間隔延長を検討し、消費電力を測る | Open |
+| A4-08 | evaluate ポーラーがアイドル時も 16 / 50ms 間隔で動作する | HOST | - | P3 | アイドル時の停止・間隔延長を検討し、消費電力を測る | Fixed(2026-10-19、§8.5) |
 | A4-09 | メトリクスは instrumentation テストからのみ取得できる | HOST | - | P3 | 生成完了時にアプリ内へ表示し、JSON をコピーできるようにする | Fixed(2026-10-19、§6.1) |
 | A4-10 | WebView の機能差により選択されるトランスポートが端末ごとに異なる | QA | - | P3 | 実機マトリクスで feature 値と選択経路を記録する | Open(Pixel 8a は `message_port` を確認済み) |
 
@@ -324,6 +325,18 @@ A4 は本書をフィードバックの正本として運用する。新しい�
 - 共有: API 26 / 28 でも FileProvider の `content://` URI を作成でき、共有 Intent の `EXTRA_STREAM` から PNG を読み出せることを確認した。
 - テスト修正: 従来の `ImageExporterTest` は保存 URI を常に `content://` と仮定し、後始末で `ContentResolver.delete(file://...)` を呼んでいたため、API 26〜28 で `IllegalArgumentException` になっていた。SDK に応じて `content://` / `file://` を検証し、レガシー経路では `File.delete()` と MediaStore エントリ削除を行うよう修正した。MediaStore 登録の確認テストも追加した。
 - 残課題: API 26 / 28 の実機(エミュレータ以外)は未確認。端末固有の Pictures パスや MediaScanner の挙動差が出た場合は A4-10 のマトリクスへ追加する。
+
+### 8.5 A4-08 実施結果(2026-10-19)
+
+- evaluate ポーラーを、未処理の要求・生成がない間は `pollWakeup`(conflated channel)で待機する方式へ変更した。従来のアイドル時 50ms ポーリングを停止し、`post` / `generate` 時に `ensurePolling()` がポーラーを起こす。処理中は従来どおり 16ms 間隔で `__pmDrain()` を呼ぶ。
+- 停止条件は「`pendingRequests` が空かつ `activeGeneration` が null」かつ outbox が空。最終イベントを失わないよう、待機前に outbox を 1 回 drain する。
+- アイドル移行時に logcat へ `evaluate poller suspended until next request` を記録する。
+- Pixel 8a の定常状態で 120 秒間の CPU 時間を `/proc/<pid>/stat` から計測した。旧実装(e72a8fa)と新実装はいずれもアプリ 10ms / JS サンドボックス 0ms で、差は測定分解能以下だった。起動直後の 60 秒では旧実装のサンドボックスが 20ms、新実装が 0ms。ポーラー停止自体は logcat で確認した。
+- 併せて Android の UX 差分を解消した:
+  - 進捗表示の開閉状態を `SharedPreferences`(`editor_preferences` / `progress_expanded`)へ保存し、ViewModel 再生成後も復元する。
+  - 画像読み込み後のシステム戻る操作で「画像をリセットしますか？」を表示する。未読み込み時は従来どおり Activity の戻る動作とし、アプリ終了確認は出さない。
+  - `PickMultipleVisualMedia` の上限を 100 枚に設定し、上限に達した選択結果では分割追加を案内する。
+  - 画像が小さく 1 ブロックしか作れない場合、ブロックサイズを短辺(UI の 8〜128px 範囲)へ自動調整し、案内を表示する。
 
 ## 9. タスク一覧(チェックリスト)
 

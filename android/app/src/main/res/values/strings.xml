@@ -22,6 +22,7 @@
     <string name="editor_tiles_count">構成画像: %1$d 枚</string>
     <string name="editor_tiles_loading">読み込み中 %1$d / %2$d 枚</string>
     <string name="editor_tiles_show_all">すべての画像を表示(%1$d 枚)</string>
+    <string name="editor_tiles_limit_reached">一度に追加できる構成画像は %1$d 枚までです。残りは再度「構成画像を追加」から追加してください。</string>
     <string name="editor_tile_remove">削除</string>
     <string name="editor_decode_failed">画像を読み込めませんでした。別の画像を選択してください。</string>
     <string name="editor_core_failed">コアで画像を処理できませんでした。別の画像を選択してください。</string>
@@ -29,11 +30,16 @@
     <string name="editor_start_edit">編集を開始</string>
     <string name="editor_title">フォトモザイク編集</string>
     <string name="editor_back">← 戻る</string>
+    <string name="editor_reset_confirm_title">画像をリセットしますか？</string>
+    <string name="editor_reset_confirm_message">読み込んだメイン画像と構成画像を破棄して開始画面に戻ります。</string>
+    <string name="editor_reset_confirm_ok">リセット</string>
+    <string name="editor_reset_confirm_cancel">キャンセル</string>
     <string name="editor_preview_empty">プレビューはありません</string>
     <string name="editor_preview_hint">プレビューをタップするとメイン画像を変更できます</string>
     <string name="editor_preview_change">メイン画像を変更</string>
     <string name="editor_block_size_label">ブロックサイズ</string>
     <string name="editor_block_size_value">%1$d px</string>
+    <string name="editor_block_size_adjusted">画像が小さいため、ブロックサイズを %1$d px に自動調整しました。</string>
     <string name="editor_main_blend_label">メイン画像に適合させる</string>
     <string name="editor_color_correct_label">色補正の強さ</string>
     <string name="editor_duplicate_de_label">重複とみなす色の近さ</string>

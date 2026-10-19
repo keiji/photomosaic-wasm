@@ -89,6 +89,9 @@ class JsCoreEngine(
     @Volatile
     private var pollJob: Job? = null
 
+    /** アイドル中のポーラーを起こすための合図(連続要求は 1 回に集約) */
+    private val pollWakeup = Channel<Unit>(Channel.CONFLATED)
+
     // サンドボックス境界では RemoteException / タイムアウト / JS 例外など
     // 多様な失敗を一括で画面状態へ変換するため、Exception 捕捉は意図的。
     @Suppress("TooGenericExceptionCaught", "CyclomaticComplexMethod", "LongMethod")
@@ -483,17 +486,19 @@ class JsCoreEngine(
             return
         }
         if (pollJob?.isActive == true) {
+            // アイドル待機中のポーラーを起こす。処理中なら次の周回で拾われる。
+            pollWakeup.trySend(Unit)
             return
         }
         pollJob = pollScope.launch { pollLoop() }
     }
 
-    @Suppress("TooGenericExceptionCaught")
+    @Suppress("TooGenericExceptionCaught", "NestedBlockDepth")
     private suspend fun pollLoop() {
         while (currentCoroutineContext().isActive) {
             val activeIsolate = isolate
             if (activeIsolate == null) {
-                delay(IDLE_POLL_MS)
+                pollWakeup.receive()
                 continue
             }
             val hasWork = pendingRequests.isNotEmpty() || activeGeneration != null
@@ -506,7 +511,14 @@ class JsCoreEngine(
                     }
                 val entry = JSONObject(raw)
                 if (entry.optString("k") == "empty") {
-                    delay(if (hasWork) ACTIVE_POLL_MS else IDLE_POLL_MS)
+                    if (hasWork) {
+                        delay(ACTIVE_POLL_MS)
+                    } else {
+                        // 未処理の要求・生成がない間は evaluate を止める。
+                        // 次の post / generate で ensurePolling() が起こす。
+                        Log.d(LOG_TAG, "evaluate poller suspended until next request")
+                        pollWakeup.receive()
+                    }
                 } else {
                     handleFallbackEntry(entry)
                 }
@@ -515,7 +527,7 @@ class JsCoreEngine(
             } catch (err: Exception) {
                 Log.e(LOG_TAG, "failed to drain evaluate transport", err)
                 failPending(err)
-                delay(IDLE_POLL_MS)
+                delay(ERROR_RETRY_MS)
             }
         }
     }
@@ -809,6 +821,7 @@ class JsCoreEngine(
         pendingRequests.clear()
         closeIsolate()
         pollScope.cancel()
+        pollWakeup.close()
         sandbox?.close()
         sandbox = null
         messageExecutor.shutdown()
@@ -844,7 +857,7 @@ class JsCoreEngine(
         const val TIMEOUT_SECONDS = 30L
         const val REQUEST_TIMEOUT_MS = 60_000L
         const val ACTIVE_POLL_MS = 16L
-        const val IDLE_POLL_MS = 50L
+        const val ERROR_RETRY_MS = 50L
         const val INPUT_CHUNK_BYTES = 512 * 1024
         const val CHANNEL_NAME = "core"
         const val GLUE_ASSET = "core/photomosaic_core_wasm.js"

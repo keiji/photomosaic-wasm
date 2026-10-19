@@ -9,6 +9,12 @@ import kotlin.math.roundToInt
 /** メイン画像の長辺上限 px(詳細設計書 5 章 main_max_edge) */
 const val MAIN_MAX_EDGE = 4096
 
+/** ブロックサイズの下限 px(基本設計書 2.2) */
+const val MIN_BLOCK_SIZE = 8
+
+/** ブロックサイズの上限 px(基本設計書 2.2) */
+const val MAX_BLOCK_SIZE = 128
+
 /** 特徴量算出用サムネイルの 1 辺 px(詳細設計書 5 章 feature_thumb、32×32 固定) */
 const val TILE_FEATURE_THUMB = 32
 
@@ -50,6 +56,29 @@ fun normalizeSize(
         height = max(1, (height * scale).roundToInt()),
         scaled = true,
     )
+}
+
+/**
+ * 画像が小さく 1 ブロックしか作れない場合の自動調整後ブロックサイズを返す(純関数)。
+ * 詳細設計書 5 章: ブロック数が 1(画像 < block_size)のとき、短辺へ自動調整する。
+ * 調整不要なら null。UI の下限・上限に収める。
+ */
+fun autoBlockSizeForSmallImage(
+    width: Int,
+    height: Int,
+    blockSize: Int,
+): Int? {
+    require(width > 0 && height > 0) { "image size must be positive" }
+    require(blockSize > 0) { "block size must be positive" }
+    val cols = (width + blockSize - 1) / blockSize
+    val rows = (height + blockSize - 1) / blockSize
+    val shortSide = min(width, height)
+    val needsAdjustment = cols == 1 && rows == 1 && shortSide < blockSize
+    return if (needsAdjustment) {
+        shortSide.coerceIn(MIN_BLOCK_SIZE, MAX_BLOCK_SIZE).takeIf { it != blockSize }
+    } else {
+        null
+    }
 }
 
 /**

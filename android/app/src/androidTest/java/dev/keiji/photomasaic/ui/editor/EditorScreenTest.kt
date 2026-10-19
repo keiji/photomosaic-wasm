@@ -13,6 +13,8 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.keiji.photomasaic.R
 import dev.keiji.photomasaic.core.GridInfo
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -59,6 +61,73 @@ class EditorScreenTest {
         composeTestRule
             .onNodeWithText(composeTestRule.activity.getString(R.string.editor_tiles_count, 1))
             .assertExists()
+    }
+
+    @Test
+    fun systemBackAsksBeforeResettingLoadedImages() {
+        val mainBitmap = Bitmap.createBitmap(100, 50, Bitmap.Config.ARGB_8888)
+        var reset = false
+        composeTestRule.setContent {
+            EditorScreen(
+                state =
+                    EditorUiState(
+                        coreVersion = "v",
+                        mainImage = MainImageUi(mainBitmap, 100, 50, scaled = false),
+                    ),
+                actions = EditorActions(onBack = { reset = true }),
+            )
+        }
+
+        composeTestRule.runOnUiThread {
+            composeTestRule.activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeTestRule
+            .onNodeWithText(composeTestRule.activity.getString(R.string.editor_reset_confirm_title))
+            .assertExists()
+        composeTestRule
+            .onNodeWithText(composeTestRule.activity.getString(R.string.editor_reset_confirm_cancel))
+            .performClick()
+        composeTestRule
+            .onNodeWithText(composeTestRule.activity.getString(R.string.editor_reset_confirm_title))
+            .assertDoesNotExist()
+        assertFalse(reset)
+
+        composeTestRule.runOnUiThread {
+            composeTestRule.activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeTestRule
+            .onNodeWithText(composeTestRule.activity.getString(R.string.editor_reset_confirm_ok))
+            .performClick()
+        assertTrue(reset)
+    }
+
+    @Test
+    fun tilesLimitAndAdjustedBlockSizeAreShown() {
+        composeTestRule.setContent {
+            EditorScreen(
+                state =
+                    EditorUiState(
+                        coreVersion = "v",
+                        tilesLimitReached = true,
+                        blockSizeAdjustedTo = 20,
+                    ),
+                actions = EditorActions(),
+            )
+        }
+        composeTestRule
+            .onNodeWithText(
+                composeTestRule.activity.getString(
+                    R.string.editor_tiles_limit_reached,
+                    100,
+                ),
+            ).assertExists()
+        composeTestRule
+            .onNodeWithText(
+                composeTestRule.activity.getString(
+                    R.string.editor_block_size_adjusted,
+                    20,
+                ),
+            ).assertExists()
     }
 
     @Test

@@ -28,6 +28,16 @@ class ImageSizingTest {
     }
 
     @Test
+    fun autoBlockSizeAdjustsOnlySingleBlockImages() {
+        assertEquals(20, autoBlockSizeForSmallImage(20, 20, 24))
+        assertEquals(10, autoBlockSizeForSmallImage(10, 20, 24))
+        assertEquals(8, autoBlockSizeForSmallImage(5, 5, 24))
+        assertEquals(null, autoBlockSizeForSmallImage(24, 24, 24))
+        assertEquals(null, autoBlockSizeForSmallImage(100, 50, 24))
+        assertEquals(null, autoBlockSizeForSmallImage(20, 30, 24))
+    }
+
+    @Test
     fun composeThumbScalesTo64() {
         assertEquals(NormalizedSize(64, 32, scaled = true), composeThumbSize(128, 64))
         assertEquals(NormalizedSize(64, 64, scaled = true), composeThumbSize(512, 512))

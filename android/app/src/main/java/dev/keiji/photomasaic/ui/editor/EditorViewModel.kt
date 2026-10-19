@@ -25,7 +25,10 @@ import dev.keiji.photomasaic.io.AndroidImageLoader
 import dev.keiji.photomasaic.io.ImageExporter
 import dev.keiji.photomasaic.io.ImageLoadException
 import dev.keiji.photomasaic.io.ImageLoader
+import dev.keiji.photomasaic.io.MAX_BLOCK_SIZE
+import dev.keiji.photomasaic.io.MIN_BLOCK_SIZE
 import dev.keiji.photomasaic.io.argbToRgba
+import dev.keiji.photomasaic.io.autoBlockSizeForSmallImage
 import dev.keiji.photomasaic.io.bitmapToRgba
 import dev.keiji.photomasaic.io.rgbaToBitmap
 import kotlinx.coroutines.CancellationException
@@ -114,7 +117,9 @@ data class EditorUiState(
     val saving: Boolean = false,
     val config: MosaicConfig? = null,
     val blockSize: Int = DEFAULT_BLOCK_SIZE,
+    val blockSizeAdjustedTo: Int? = null,
     val progressExpanded: Boolean = true,
+    val tilesLimitReached: Boolean = false,
     val notice: EditorNotice? = null,
     val shareIntent: Intent? = null,
 ) {
@@ -128,7 +133,7 @@ data class EditorUiState(
 /** 画面操作のコールバック(A2) */
 data class EditorActions(
     val onMainImageSelected: (Uri) -> Unit = {},
-    val onTilesSelected: (List<Uri>) -> Unit = {},
+    val onTilesSelected: (List<Uri>, Boolean) -> Unit = { _, _ -> },
     val onRemoveTile: (Long) -> Unit = {},
     val onStartEdit: () -> Unit = {},
     val onBack: () -> Unit = {},
@@ -158,8 +163,15 @@ class EditorViewModel(
     private val core: CoreEngine,
     private val imageLoader: ImageLoader,
     private val exporter: ImageExporter,
+    private val progressPreferences: ProgressPreferences,
 ) : ViewModel() {
-    private val _uiState = MutableStateFlow(EditorUiState(coreVersion))
+    private val _uiState =
+        MutableStateFlow(
+            EditorUiState(
+                coreVersion = coreVersion,
+                progressExpanded = progressPreferences.isExpanded(),
+            ),
+        )
     val uiState: StateFlow<EditorUiState> = _uiState.asStateFlow()
 
     private var nextTileId = 0L
@@ -172,6 +184,7 @@ class EditorViewModel(
     private var sessionToken = 0
 
     /** メイン画像を選択・変更する */
+    @Suppress("LongMethod")
     fun setMainImage(uri: Uri) {
         val session = sessionToken
         stopGeneration(notify = false)
@@ -183,10 +196,19 @@ class EditorViewModel(
                     withContext(Dispatchers.Default) {
                         bitmapToRgba(loaded.bitmap)
                     }
-                val grid =
+                var grid =
                     core.setMainImage(
                         RgbaImage(loaded.width, loaded.height, rgba),
                     )
+                val adjustedBlockSize =
+                    autoBlockSizeForSmallImage(
+                        width = loaded.width,
+                        height = loaded.height,
+                        blockSize = grid.blockSize,
+                    )
+                if (adjustedBlockSize != null) {
+                    grid = core.setBlockSize(adjustedBlockSize)
+                }
                 val meanColors = core.getBlockMeanColors()
                 val preview =
                     withContext(Dispatchers.Default) {
@@ -208,6 +230,8 @@ class EditorViewModel(
                                 scaled = loaded.scaled,
                             ),
                         grid = grid,
+                        blockSize = grid.blockSize,
+                        blockSizeAdjustedTo = adjustedBlockSize,
                         preview = preview,
                         previewRevision = it.previewRevision + 1,
                         progress = null,
@@ -229,13 +253,22 @@ class EditorViewModel(
 
     /** 構成画像をまとめて追加する(デコード後にコアへ一括登録する) */
     @Suppress("ComplexCondition", "LongMethod")
-    fun addTiles(uris: List<Uri>) {
+    fun addTiles(
+        uris: List<Uri>,
+        limitReached: Boolean = false,
+    ) {
         if (uris.isEmpty() || _uiState.value.loading != null) {
             return
         }
         val session = sessionToken
         viewModelScope.launch {
-            _uiState.update { it.copy(error = null, loading = EditorUiState.Loading(0, uris.size)) }
+            _uiState.update {
+                it.copy(
+                    error = null,
+                    loading = EditorUiState.Loading(0, uris.size),
+                    tilesLimitReached = limitReached,
+                )
+            }
             val inputs = mutableListOf<TileInput>()
             val tiles = mutableListOf<TileUi>()
             var processed = 0
@@ -385,6 +418,7 @@ class EditorViewModel(
                         it.copy(
                             grid = newGrid,
                             blockSize = newGrid.blockSize,
+                            blockSizeAdjustedTo = null,
                             preview = preview,
                             previewRevision = it.previewRevision + 1,
                             progress = null,
@@ -483,9 +517,11 @@ class EditorViewModel(
         _uiState.update { it.copy(shareIntent = null) }
     }
 
-    /** 進捗表示領域の開閉を切り替える */
+    /** 進捗表示領域の開閉を切り替え、次回起動のために保存する */
     fun toggleProgress() {
-        _uiState.update { it.copy(progressExpanded = !it.progressExpanded) }
+        val expanded = !_uiState.value.progressExpanded
+        progressPreferences.setExpanded(expanded)
+        _uiState.update { it.copy(progressExpanded = expanded) }
     }
 
     /** API 26〜28 の保存権限が拒否された */
@@ -516,7 +552,11 @@ class EditorViewModel(
             resultBitmap = null
             gridPreview = null
             mosaicBitmap = null
-            _uiState.value = EditorUiState(coreVersion)
+            _uiState.value =
+                EditorUiState(
+                    coreVersion = coreVersion,
+                    progressExpanded = progressPreferences.isExpanded(),
+                )
         }
     }
 
@@ -825,8 +865,6 @@ class EditorViewModel(
 
     companion object {
         private const val LOG_TAG = "EditorViewModel"
-        private const val MIN_BLOCK_SIZE = 8
-        private const val MAX_BLOCK_SIZE = 128
         private const val BLOCK_SIZE_DEBOUNCE_MS = 300L
         private const val FEATURE_SIZE = 32
         private const val BYTES_PER_PIXEL = 4
@@ -849,6 +887,7 @@ class EditorViewModel(
                         core = core,
                         imageLoader = AndroidImageLoader(appContext),
                         exporter = ImageExporter(appContext),
+                        progressPreferences = SharedPreferencesProgressPreferences(appContext),
                     )
                 }
             }

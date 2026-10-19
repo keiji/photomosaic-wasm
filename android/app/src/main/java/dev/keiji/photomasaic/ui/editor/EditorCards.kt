@@ -35,6 +35,9 @@ import dev.keiji.photomasaic.io.MAIN_MAX_EDGE
 /** タイル一覧の初期表示枚数(基本設計書 2.2) */
 private const val TILE_PREVIEW_LIMIT = 20
 
+/** 1 回の Photo Picker で選択できる構成画像の上限(基本設計書 2.2) */
+internal const val MAX_TILES_PER_PICK = 100
+
 @Composable
 internal fun MainImageCard(
     main: MainImageUi?,
@@ -127,6 +130,13 @@ internal fun TilesCard(
                 )
             }
             state.loading?.let { TilesLoading(it) }
+            if (state.tilesLimitReached) {
+                Text(
+                    text = stringResource(R.string.editor_tiles_limit_reached, MAX_TILES_PER_PICK),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
             Button(
                 onClick = onAddTiles,
                 enabled = state.loading == null,

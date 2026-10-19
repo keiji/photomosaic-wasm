@@ -12,6 +12,7 @@ import dev.keiji.photomasaic.io.ImageLoader
 import dev.keiji.photomasaic.io.LoadedMainImage
 import dev.keiji.photomasaic.io.LoadedTile
 import dev.keiji.photomasaic.ui.editor.EditorViewModel
+import dev.keiji.photomasaic.ui.editor.SharedPreferencesProgressPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
@@ -63,6 +64,10 @@ class EditorMemoryTest {
                     core = engine,
                     imageLoader = FakeLargeImageLoader(mainBitmap, tileBitmap),
                     exporter = ImageExporter(ApplicationProvider.getApplicationContext()),
+                    progressPreferences =
+                        SharedPreferencesProgressPreferences(
+                            ApplicationProvider.getApplicationContext(),
+                        ),
                 )
             viewModel.setMainImage(Uri.parse("content://test/main"))
             await { viewModel.uiState.value.grid != null }

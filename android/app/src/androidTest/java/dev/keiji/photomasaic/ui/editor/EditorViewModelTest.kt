@@ -33,6 +33,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -105,6 +106,53 @@ class EditorViewModelTest {
         }
 
     @Test
+    fun progressTogglePersistsAcrossViewModels() {
+        val preferences = FakeProgressPreferences(expandedState = true)
+        val first = createViewModel(FakeImageLoader(mainBitmap, tileBitmap), preferences)
+        assertTrue(first.uiState.value.progressExpanded)
+
+        first.toggleProgress()
+        assertFalse(first.uiState.value.progressExpanded)
+        assertFalse(preferences.expandedState)
+
+        val second = createViewModel(FakeImageLoader(mainBitmap, tileBitmap), preferences)
+        assertFalse(second.uiState.value.progressExpanded)
+    }
+
+    @Test
+    fun tilesLimitFlagIsReflected() =
+        runBlocking {
+            val viewModel = createViewModel(FakeImageLoader(mainBitmap, tileBitmap))
+            viewModel.addTiles(listOf(Uri.parse("content://test/1")), limitReached = true)
+            await { viewModel.uiState.value.loading == null && viewModel.uiState.value.tiles.size == 1 }
+            assertTrue(viewModel.uiState.value.tilesLimitReached)
+
+            viewModel.addTiles(listOf(Uri.parse("content://test/2")), limitReached = false)
+            await { viewModel.uiState.value.loading == null && viewModel.uiState.value.tiles.size == 2 }
+            assertFalse(viewModel.uiState.value.tilesLimitReached)
+        }
+
+    @Test
+    fun smallMainImageAdjustsBlockSize() =
+        runBlocking {
+            val small = Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888)
+            try {
+                val viewModel = createViewModel(FakeImageLoader(small, tileBitmap))
+                viewModel.setMainImage(Uri.parse("content://test/small"))
+                await { viewModel.uiState.value.mainImage != null }
+                assertEquals(
+                    20,
+                    viewModel.uiState.value.grid
+                        ?.blockSize,
+                )
+                assertEquals(20, viewModel.uiState.value.blockSize)
+                assertEquals(20, viewModel.uiState.value.blockSizeAdjustedTo)
+            } finally {
+                small.recycle()
+            }
+        }
+
+    @Test
     fun enterEditGeneratesAndEnablesSave() =
         runBlocking {
             val viewModel = createViewModel(FakeImageLoader(mainBitmap, tileBitmap))
@@ -146,12 +194,16 @@ class EditorViewModelTest {
             )
         }
 
-    private fun createViewModel(loader: ImageLoader): EditorViewModel =
+    private fun createViewModel(
+        loader: ImageLoader,
+        progressPreferences: ProgressPreferences = FakeProgressPreferences(),
+    ): EditorViewModel =
         EditorViewModel(
             coreVersion = "v",
             core = FakeCoreEngine(),
             imageLoader = loader,
             exporter = ImageExporter(ApplicationProvider.getApplicationContext()),
+            progressPreferences = progressPreferences,
         )
 
     private suspend fun await(predicate: () -> Boolean) {
@@ -163,19 +215,34 @@ class EditorViewModelTest {
     }
 }
 
+private class FakeProgressPreferences(
+    var expandedState: Boolean = true,
+) : ProgressPreferences {
+    override fun isExpanded(): Boolean = expandedState
+
+    override fun setExpanded(expanded: Boolean) {
+        expandedState = expanded
+    }
+}
+
 private class FakeCoreEngine : CoreEngine {
     private var width = 0
     private var height = 0
+    private var blockSize = DEFAULT_BLOCK_SIZE
 
     override suspend fun start(): CoreStartupResult = CoreStartupResult.Ready("v")
 
     override suspend fun setMainImage(image: RgbaImage): GridInfo {
         width = image.width
         height = image.height
+        blockSize = DEFAULT_BLOCK_SIZE
         return grid()
     }
 
-    override suspend fun setBlockSize(px: Int): GridInfo = grid()
+    override suspend fun setBlockSize(px: Int): GridInfo {
+        blockSize = px
+        return grid()
+    }
 
     override suspend fun getBlockMeanColors(): ByteArray {
         val total = grid().totalBlocks
@@ -247,10 +314,9 @@ private class FakeCoreEngine : CoreEngine {
     override fun close() = Unit
 
     private fun grid(): GridInfo {
-        val block = 24
-        val cols = (width + block - 1) / block
-        val rows = (height + block - 1) / block
-        return GridInfo(width, height, block, cols, rows, cols * rows)
+        val cols = (width + blockSize - 1) / blockSize
+        val rows = (height + blockSize - 1) / blockSize
+        return GridInfo(width, height, blockSize, cols, rows, cols * rows)
     }
 
     private fun generationFlow(): Flow<GenerationEvent> =
@@ -268,6 +334,8 @@ private class FakeCoreEngine : CoreEngine {
             )
         }
 }
+
+private const val DEFAULT_BLOCK_SIZE = 24
 
 private class FakeImageLoader(
     private val mainBitmap: Bitmap,
