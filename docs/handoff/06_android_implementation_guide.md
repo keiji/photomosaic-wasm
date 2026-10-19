@@ -275,7 +275,7 @@ A4 は本書をフィードバックの正本として運用する。新しい�
 | A4-01 | evaluate 経路のタイル登録が 1 枚ごとの制御要求で遅い(300 枚 約 15.9 秒、2,000 枚 約 105 秒) | HOST / CORE | 未確認(Web は直接呼び出しのため再現しない見込み) | P1 | `addTiles` control を実装し、転送時間を再計測する | Fixed(2026-10-19、§8.2) |
 | A4-02 | MessagePort 経路の実機確認が必要(エミュレータの WebView 133 は非対応) | QA | - | P1 | Pixel 8a で生成・進捗・キャンセルを確認する | Fixed(2026-10-19、§8.3) |
 | A4-03 | S-mid の P4 が 1.58 秒(エミュレータ)/ 2.98 秒(Pixel 8a)で、デスクトップ目標 1.0 秒を超える | CORE / 未判定 | 未確認 | P2 | Web の同一条件と比較し、コア改善の要否を判定する | Open |
-| A4-04 | API 26〜28 の `WRITE_EXTERNAL_STORAGE` 保存経路が未検証 | QA | - | P2 | API 26 / 28 エミュレータで保存・共有を確認する | Open |
+| A4-04 | API 26〜28 の `WRITE_EXTERNAL_STORAGE` 保存経路が未検証 | QA | - | P2 | API 26 / 28 エミュレータで保存・共有を確認する | Fixed(2026-10-19、§8.4) |
 | A4-05 | 低メモリ実機での S-large(12MP・2,000 枚)が未検証 | QA | - | P2 | 2GB 級実機で生成完了と安全な失敗を確認する | Open |
 | A4-06 | Display P3 などの広色域入力の正規化が未検証 | SPEC / QA | 未確認 | P2 | P3 画像を Web / Android で比較し、sRGB 変換ルールを仕様化する | Open |
 | A4-07 | プロセス死後に編集状態を復元しない(起動画面から再初期化) | SPEC | - | P3 | 再初期化で許容するか、`SavedStateHandle` 等で復元するかを決定する | Open |
@@ -314,6 +314,16 @@ A4 は本書をフィードバックの正本として運用する。新しい�
 
 - Pixel 8a の P4 はエミュレータより遅い。端末差のため A4-03 の Web 比較とコア改善判定は継続する。
 - エミュレータ WebView 133 では MessagePort 非対応のため、引き続き evaluate フォールバックが使われる。
+
+### 8.4 A4-04 実施結果(2026-10-19)
+
+- 検証環境: API 26(Android 8.0.0、`google_apis` x86_64)と API 28(Android 9、`google_apis` x86_64)のエミュレータ。API 27 は API 26〜28 と同じレガシー保存分岐のため個別実行せず、代表として両端の API を確認した。
+- `ImageExporterTest` を API 26 / 28 で実行し、3 件すべて成功した。API 36 でも同じ 3 件が成功し、スコープドストレージ経路のリグレッションがないことを確認した。
+- 保存: API 26 / 28 では `Pictures/Photomosaic/photomosaic_YYYYMMDD_HHMMSS.png` へ PNG を書き込み、`file://` URI を返す。`WRITE_EXTERNAL_STORAGE` を付与した状態で、ファイルが存在し `ContentResolver` から読み出せること、`MediaScannerConnection` により MediaStore へ登録されることを確認した。
+- 権限: `WRITE_EXTERNAL_STORAGE` が無い場合、`ImageExporter.savePng()` は `SecurityException` を送出する。UI 側はこれを `StoragePermissionDenied` に変換する実装(§6.1)であり、保存前に実行時権限を要求する。
+- 共有: API 26 / 28 でも FileProvider の `content://` URI を作成でき、共有 Intent の `EXTRA_STREAM` から PNG を読み出せることを確認した。
+- テスト修正: 従来の `ImageExporterTest` は保存 URI を常に `content://` と仮定し、後始末で `ContentResolver.delete(file://...)` を呼んでいたため、API 26〜28 で `IllegalArgumentException` になっていた。SDK に応じて `content://` / `file://` を検証し、レガシー経路では `File.delete()` と MediaStore エントリ削除を行うよう修正した。MediaStore 登録の確認テストも追加した。
+- 残課題: API 26 / 28 の実機(エミュレータ以外)は未確認。端末固有の Pictures パスや MediaScanner の挙動差が出た場合は A4-10 のマトリクスへ追加する。
 
 ## 9. タスク一覧(チェックリスト)
 
