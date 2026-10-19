@@ -58,11 +58,11 @@ photomosaic-wasm/
 ```
 [Web UI (TS)] ────────────► [ホスト層: ページの JS] ──────────────┐
                                                                   ├──► [core (Rust) を WASM として実行]
-[Android UI (Kotlin)] ──► [ホスト層: JS サンドボックス(MessagePort)] ─┘
+[Android UI (Kotlin)] ──► [ホスト層: JS サンドボックス(MessagePort / evaluate)] ─┘
 ```
 
 - `core` はプラットフォーム非依存(標準ライブラリ + `no_std` 相当の算術のみ)。画像デコード・エンコード・ファイル I/O を含まない。
-- Android は JavaScript エンジン(androidx.javascriptengine: `JavaScriptSandbox`)をホストに、Web と同一の .wasm を実行する。ホストとの双方向通信は MessagePort API を使用する。JNI によるネイティブコードの実装は行わない(セキュリティ方針)。
+- Android は JavaScript エンジン(androidx.javascriptengine: `JavaScriptSandbox`)をホストに、Web と同一の .wasm を実行する。ホストとの双方向通信は MessagePort API を第一選択とし、非対応時は named data + evaluate、さらに非対応なら Base64 evaluate へ段階的にフォールバックする。JNI によるネイティブコードの実装は行わない(セキュリティ方針)。
 - UI 層はビジネスロジックを持たず、状態管理(store / ViewModel)を経由してコアを呼び出す。
 - ホスト層(Web のグルーシップ、Android の JavaScript エンジン ホスト)は薄く保ち、メモリ受け渡しとコールバック変換のみを担う。
 
@@ -394,11 +394,14 @@ D(block, tile) = w_c * ΔE76(block.mean_lab, tile.mean_lab)
 ### 8.2 Android
 
 - コアは JavaScript エンジン サンドボックス(androidx.javascriptengine の `JavaScriptSandbox` / `JavaScriptIsolate`)内で実行する。サンドボックスはアプリとは別プロセスで動くため、処理中もアプリの UI スレッドは塞がない。
-- Kotlin ↔ ホスト JS の双方向通信は **MessagePort API** を使用する(Kotlin → JS: 制御メッセージ。JS → Kotlin: 進捗・結果メッセージ)。
-- Kotlin → JS の大容量データ(RGBA バイト列)はメッセージに含めず、named data 提供 API で渡し、メッセージは JSON 文字列で参照(dataRef)のみを持つ。JS → Kotlin には named data の consume API が無いため、部分結果・完成画像は JSON メッセージの直後に ArrayBuffer を MessagePort で送る。
+- Kotlin ↔ ホスト JS の双方向通信は **MessagePort API** を第一選択とする(Kotlin → JS: 制御メッセージ。JS → Kotlin: 進捗・結果メッセージ)。
+- 起動時に `JavaScriptSandbox.isFeatureSupported` で WASM / MessagePort / named data / Promise / `EVALUATE_WITHOUT_TRANSACTION_LIMIT` / isolate max heap を確認し、利用可能な組み合わせでトランスポートを選ぶ。
+- MessagePort 経路では、Kotlin → JS の大容量データ(RGBA バイト列)は named data が使える場合は named data 提供 API で渡し、メッセージは JSON 文字列で参照(dataRef)のみを持つ。named data が無い場合は `inputBegin` の後に ArrayBuffer を MessagePort で送る。JS → Kotlin には named data の consume API が無いため、部分結果・完成画像は JSON メッセージの直後に ArrayBuffer を MessagePort で送る。
+- MessagePort 非対応時は named data + evaluate 経路を使う。入力は named data、出力は `evaluateJavaScriptAsync("__pmDrain()")` のポーリングで受け、バイナリは 512 KiB 単位の Base64 チャンクにする。
+- named data 非対応時は Base64 evaluate 経路を使う。入力は `inputBegin` / `inputChunk` でチャンク転送し、出力は named data + evaluate 経路と同じ outbox / Base64 チャンクを使う。
 - 画像のデコード・縮小・PNG エンコードは Kotlin 側(プラットフォーム API)が担当する。サンドボックスには DOM/Canvas がないため、内部はピクセル配列の計算に専念する。
-- バッチ駆動はホスト JS 内で `begin_run` / `step_run` を呼び、サンドボックスに `setTimeout` が無いため `stepDone` → `step` の MessagePort 往復でバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。
-- キャンセルはコルーチンキャンセルに連動させ、MessagePort 経由でホストの `cancel()` を呼ぶ。コアの `cancel()` は実行状態を破棄し、確定済みの合成結果を保持する。isolate は画面破棄時に close してリソースを解放する。
+- バッチ駆動はホスト JS 内で `begin_run` / `step_run` を呼び、サンドボックスに `setTimeout` が無いため `stepDone` → `step` の往復でバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。
+- キャンセルはコルーチンキャンセルに連動させ、選択中のトランスポート経由でホストの `cancel()` を呼ぶ。コアの `cancel()` は実行状態を破棄し、確定済みの合成結果を保持する。isolate は画面破棄時に close してリソースを解放する。
 
 ## 9. メモリ設計
 

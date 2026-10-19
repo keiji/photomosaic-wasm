@@ -1,6 +1,7 @@
 package dev.keiji.photomasaic.core
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import androidx.javascriptengine.JavaScriptConsoleCallback
 import androidx.javascriptengine.JavaScriptIsolate
@@ -10,15 +11,24 @@ import androidx.javascriptengine.MessagePort
 import androidx.javascriptengine.MessagePortClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -28,12 +38,14 @@ import java.util.concurrent.TimeUnit
  *
  * - 起動時に `JavaScriptSandbox.isSupported()` と `typeof WebAssembly` を検査する
  * - グルー(wasm-bindgen no-modules ターゲット)と .wasm は assets から読み込む
- * - Kotlin → JS の制御は MessagePort の文字列メッセージ。RGBA は named data で渡し、
- *   メッセージは参照(dataRef)のみを持つ
- * - JS → Kotlin の進捗・部分結果・完成画像は MessagePort の文字列 + ArrayBuffer で受ける
+ * - MessagePort が使える端末では、制御は MessagePort の文字列メッセージで送る。
+ *   RGBA は named data で渡し、メッセージは参照(dataRef)のみを持つ
+ * - MessagePort が使えない端末では evaluate トランスポートへフォールバックする。
+ *   制御は `evaluateJavaScriptAsync`、応答は JS の outbox を `__pmDrain()` で
+ *   ポーリングして受け取る。RGBA は base64 チャンクで受ける
  * - 要求と応答は id で対応付け、タイムアウトで失敗させる
  */
-@Suppress("TooManyFunctions")
+@Suppress("TooManyFunctions", "LargeClass")
 class JsCoreEngine(
     private val context: Context,
 ) : CoreEngine {
@@ -42,16 +54,26 @@ class JsCoreEngine(
 
     @Volatile
     private var messagePort: MessagePort? = null
+
+    @Volatile
+    private var transport = Transport.MESSAGE_PORT
+
+    @Volatile
+    private var namedDataAvailable = false
     private var coreVersion: String? = null
 
     private val messageExecutor =
         Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "js-core-port") }
     private val pendingRequests = ConcurrentHashMap<Long, PendingRequest>()
 
-    // 以下はメッセージ受信スレッド(単一スレッド)だけが触る
+    // 以下はメッセージ受信スレッド(MessagePort)またはポーラーだけが触る
     private var pendingBinaryRequestId: Long? = null
     private var pendingBatchMeta: BatchMeta? = null
     private var pendingResultMeta: ResultMeta? = null
+
+    // evaluate トランスポート用。ポーラーだけが触る
+    private val fallbackBuffer = ByteArrayOutputStream()
+    private var fallbackExpectedLength = 0
 
     @Volatile
     private var activeGeneration: Channel<GenerationEvent>? = null
@@ -60,10 +82,15 @@ class JsCoreEngine(
     private var namedDataCounter = 0L
     private val requestMutex = Mutex()
     private val runMutex = Mutex()
+    private val evalMutex = Mutex()
+    private val pollScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile
+    private var pollJob: Job? = null
 
     // サンドボックス境界では RemoteException / タイムアウト / JS 例外など
     // 多様な失敗を一括で画面状態へ変換するため、Exception 捕捉は意図的。
-    @Suppress("TooGenericExceptionCaught", "CyclomaticComplexMethod")
+    @Suppress("TooGenericExceptionCaught", "CyclomaticComplexMethod", "LongMethod")
     override suspend fun start(): CoreStartupResult =
         withContext(Dispatchers.IO) {
             if (!JavaScriptSandbox.isSupported()) {
@@ -71,6 +98,7 @@ class JsCoreEngine(
             }
             val readyVersion = coreVersion
             if (isolate != null && readyVersion != null) {
+                ensurePolling()
                 return@withContext CoreStartupResult.Ready(readyVersion)
             }
             try {
@@ -83,27 +111,71 @@ class JsCoreEngine(
                 if (wasmType != "object" && wasmType != "function") {
                     return@withContext CoreStartupResult.WebAssemblyUnavailable
                 }
-                if (!activeSandbox.isFeatureSupported(JavaScriptSandbox.JS_FEATURE_WASM_COMPILATION)) {
+                val wasmSupported =
+                    activeSandbox.isFeatureSupported(JavaScriptSandbox.JS_FEATURE_WASM_COMPILATION)
+                val namedDataSupported =
+                    activeSandbox.isFeatureSupported(
+                        JavaScriptSandbox.JS_FEATURE_PROVIDE_CONSUME_ARRAY_BUFFER,
+                    )
+                val promiseSupported =
+                    activeSandbox.isFeatureSupported(JavaScriptSandbox.JS_FEATURE_PROMISE_RETURN)
+                val messagePortSupported =
+                    activeSandbox.isFeatureSupported(JavaScriptSandbox.JS_FEATURE_MESSAGE_PORTS)
+                val transactionLimitSupported =
+                    activeSandbox.isFeatureSupported(
+                        JavaScriptSandbox.JS_FEATURE_EVALUATE_WITHOUT_TRANSACTION_LIMIT,
+                    )
+                val isolateMaxHeapSupported =
+                    activeSandbox.isFeatureSupported(
+                        JavaScriptSandbox.JS_FEATURE_ISOLATE_MAX_HEAP_SIZE,
+                    )
+                Log.i(
+                    LOG_TAG,
+                    "features: wasm=$wasmSupported messagePort=$messagePortSupported " +
+                        "provideNamedData=$namedDataSupported promise=$promiseSupported " +
+                        "evaluateWithoutTransactionLimit=$transactionLimitSupported " +
+                        "isolateMaxHeap=$isolateMaxHeapSupported",
+                )
+                if (!wasmSupported) {
                     return@withContext CoreStartupResult.WebAssemblyUnavailable
                 }
-                if (!activeSandbox.isFeatureSupported(JavaScriptSandbox.JS_FEATURE_PROVIDE_CONSUME_ARRAY_BUFFER)) {
-                    return@withContext CoreStartupResult.Failed("named data (ArrayBuffer) is not supported")
-                }
-                if (!activeSandbox.isFeatureSupported(JavaScriptSandbox.JS_FEATURE_PROMISE_RETURN)) {
+                if (!promiseSupported) {
                     return@withContext CoreStartupResult.Failed("Promise return is not supported")
                 }
-                if (!activeSandbox.isFeatureSupported(JavaScriptSandbox.JS_FEATURE_MESSAGE_PORTS)) {
-                    return@withContext CoreStartupResult.Failed("MessagePort is not supported")
-                }
 
-                // ホスト JS が参照する MessagePort を先に用意する。
-                // ハンドラ設定は __pmInit 内で行い、その完了を待ってから制御を送る。
-                messagePort =
-                    activeIsolate.createMessageChannel(
-                        CHANNEL_NAME,
-                        messageExecutor,
-                        MessagePortClient { message -> onPortMessage(message) },
+                // 段階的機能低下:
+                // MessagePort > named data + evaluate > Base64 evaluate
+                // MessagePort 自体がバイナリ入力を持てるため、named data の有無に
+                // かかわらず MessagePort を優先する。
+                var usePort = messagePortSupported
+                if (messagePortSupported && !namedDataSupported) {
+                    Log.i(
+                        LOG_TAG,
+                        "MessagePort is available without named data; " +
+                            "using MessagePort binary input",
                     )
+                }
+                if (usePort) {
+                    messagePort =
+                        try {
+                            activeIsolate.createMessageChannel(
+                                CHANNEL_NAME,
+                                messageExecutor,
+                                MessagePortClient { message -> onPortMessage(message) },
+                            )
+                        } catch (err: Exception) {
+                            Log.w(LOG_TAG, "MessagePort is unavailable; using evaluate transport", err)
+                            usePort = false
+                            null
+                        }
+                }
+                namedDataAvailable = namedDataSupported
+                transport =
+                    when {
+                        messagePort != null -> Transport.MESSAGE_PORT
+                        namedDataSupported -> Transport.NAMED_DATA_EVALUATE
+                        else -> Transport.STRING_EVALUATE
+                    }
 
                 // ホストスクリプト(UTF-8 ポリフィル + プロトコル)を先に評価し、
                 // 次に wasm-bindgen グルーを評価する
@@ -111,10 +183,19 @@ class JsCoreEngine(
                 evaluate(activeIsolate, readAssetText(GLUE_ASSET))
 
                 namedDataCounter += 1
-                val wasmRef = "wasm-$namedDataCounter"
-                activeIsolate.provideNamedData(wasmRef, readAssetBytes(WASM_ASSET))
-                val version = evaluate(activeIsolate, "__pmInit('$wasmRef')")
+                val wasmBytes = readAssetBytes(WASM_ASSET)
+                val version =
+                    if (namedDataSupported) {
+                        val wasmRef = "wasm-$namedDataCounter"
+                        activeIsolate.provideNamedData(wasmRef, wasmBytes)
+                        evaluate(activeIsolate, "__pmInit('$wasmRef', $usePort, true)")
+                    } else {
+                        val wasmBase64 = Base64.encodeToString(wasmBytes, Base64.NO_WRAP)
+                        evaluate(activeIsolate, "__pmInit('$wasmBase64', false, false)")
+                    }
                 coreVersion = version
+                ensurePolling()
+                Log.i(LOG_TAG, "core started with ${transport.name.lowercase()} transport")
                 CoreStartupResult.Ready(version)
             } catch (err: Exception) {
                 closeIsolate()
@@ -246,15 +327,14 @@ class JsCoreEngine(
     ): JSONObject =
         requestMutex.withLock {
             val id = ++nextRequestId
-            val json = build(id)
+            val json = build(id).put("id", id)
             val deferred = CompletableDeferred<JSONObject>()
             pendingRequests[id] = PendingRequest(json = deferred)
-            namedData(id).forEach { (name, bytes) ->
-                val activeIsolate = isolate ?: throw CoreException("core is not started")
-                activeIsolate.provideNamedData(name, bytes)
-            }
-            post(json)
             try {
+                namedData(id).forEach { (name, bytes) ->
+                    provideBinary(name, bytes)
+                }
+                post(json)
                 withTimeout(REQUEST_TIMEOUT_MS) { deferred.await() }
             } finally {
                 pendingRequests.remove(id)
@@ -264,12 +344,12 @@ class JsCoreEngine(
     private suspend fun requestBinary(build: (Long) -> JSONObject): ByteArray =
         requestMutex.withLock {
             val id = ++nextRequestId
-            val json = build(id)
+            val json = build(id).put("id", id)
             val jsonDeferred = CompletableDeferred<JSONObject>()
             val binaryDeferred = CompletableDeferred<ByteArray>()
             pendingRequests[id] = PendingRequest(json = jsonDeferred, binary = binaryDeferred)
-            post(json)
             try {
+                post(json)
                 withTimeout(REQUEST_TIMEOUT_MS) { binaryDeferred.await() }
             } finally {
                 pendingRequests.remove(id)
@@ -278,14 +358,224 @@ class JsCoreEngine(
 
     private fun control(type: String): JSONObject = JSONObject().put("type", type)
 
-    private fun post(json: JSONObject) {
+    private suspend fun post(json: JSONObject) {
+        val port = messagePort
+        if (port != null) {
+            port.postMessage(Message.createStringMessage(json.toString()))
+            return
+        }
+        ensurePolling()
+        sendControl(json)
+    }
+
+    private fun postPort(json: JSONObject) {
         val port = messagePort ?: throw CoreException("core is not started")
         port.postMessage(Message.createStringMessage(json.toString()))
     }
 
-    private fun sendCancel() {
+    private suspend fun sendControl(json: JSONObject) {
+        val activeIsolate = isolate ?: throw CoreException("core is not started")
+        val script = "__pmHandleControl(${JSONObject.quote(json.toString())})"
+        evalMutex.withLock {
+            withContext(Dispatchers.IO) {
+                evaluate(activeIsolate, script)
+            }
+        }
+    }
+
+    private suspend fun provideBinary(
+        name: String,
+        bytes: ByteArray,
+    ) {
+        if (transport == Transport.STRING_EVALUATE) {
+            provideStringInput(name, bytes)
+            return
+        }
+        if (transport == Transport.MESSAGE_PORT && !namedDataAvailable) {
+            providePortInput(name, bytes)
+            return
+        }
+        val activeIsolate = isolate ?: throw CoreException("core is not started")
+        activeIsolate.provideNamedData(name, bytes)
+    }
+
+    private suspend fun provideStringInput(
+        name: String,
+        bytes: ByteArray,
+    ) {
+        sendControl(
+            JSONObject()
+                .put("type", "inputBegin")
+                .put("id", name)
+                .put("length", bytes.size),
+        )
+        var offset = 0
+        while (offset < bytes.size) {
+            val end = minOf(offset + INPUT_CHUNK_BYTES, bytes.size)
+            sendControl(
+                JSONObject()
+                    .put("type", "inputChunk")
+                    .put("id", name)
+                    .put("data", Base64.encodeToString(bytes.copyOfRange(offset, end), Base64.NO_WRAP)),
+            )
+            offset = end
+        }
+    }
+
+    private fun providePortInput(
+        name: String,
+        bytes: ByteArray,
+    ) {
+        val port = messagePort ?: throw CoreException("core is not started")
+        port.postMessage(
+            Message.createStringMessage(
+                JSONObject()
+                    .put("type", "inputBegin")
+                    .put("id", name)
+                    .put("length", bytes.size)
+                    .toString(),
+            ),
+        )
+        var offset = 0
+        while (offset < bytes.size) {
+            val end = minOf(offset + INPUT_CHUNK_BYTES, bytes.size)
+            port.postMessage(Message.createArrayBufferMessage(bytes.copyOfRange(offset, end)))
+            offset = end
+        }
+    }
+
+    private suspend fun sendCancel() {
         runCatching { post(JSONObject().put("type", "cancel")) }
             .onFailure { Log.w(LOG_TAG, "failed to send cancel", it) }
+    }
+
+    @Synchronized
+    private fun ensurePolling() {
+        if (transport == Transport.MESSAGE_PORT) {
+            return
+        }
+        if (pollJob?.isActive == true) {
+            return
+        }
+        pollJob = pollScope.launch { pollLoop() }
+    }
+
+    @Suppress("TooGenericExceptionCaught")
+    private suspend fun pollLoop() {
+        while (currentCoroutineContext().isActive) {
+            val activeIsolate = isolate
+            if (activeIsolate == null) {
+                delay(IDLE_POLL_MS)
+                continue
+            }
+            val hasWork = pendingRequests.isNotEmpty() || activeGeneration != null
+            try {
+                val raw =
+                    evalMutex.withLock {
+                        withContext(Dispatchers.IO) {
+                            evaluate(activeIsolate, "__pmDrain()")
+                        }
+                    }
+                val entry = JSONObject(raw)
+                if (entry.optString("k") == "empty") {
+                    delay(if (hasWork) ACTIVE_POLL_MS else IDLE_POLL_MS)
+                } else {
+                    handleFallbackEntry(entry)
+                }
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                Log.e(LOG_TAG, "failed to drain evaluate transport", err)
+                failPending(err)
+                delay(IDLE_POLL_MS)
+            }
+        }
+    }
+
+    private suspend fun handleFallbackEntry(entry: JSONObject) {
+        when (entry.optString("k")) {
+            "json" -> {
+                val json = entry.getJSONObject("v")
+                val type = json.optString("type")
+                if (type == "stepDone") {
+                    if (activeGeneration != null) {
+                        sendControl(control("step"))
+                    }
+                } else {
+                    handleTextMessage(json.toString(), allowStep = false)
+                    if (type == "batchDone" && pendingBatchMeta?.length == 0) {
+                        completeFallbackBinary()
+                    } else if (type == "result" && pendingResultMeta?.length == 0) {
+                        completeFallbackBinary()
+                    }
+                }
+            }
+            "chunk" -> appendFallbackChunk(entry.getString("d"))
+            "empty" -> Unit
+            else -> Log.w(LOG_TAG, "unknown fallback entry: ${entry.optString("k")}")
+        }
+    }
+
+    private fun appendFallbackChunk(data: String) {
+        val decoded = Base64.decode(data, Base64.DEFAULT)
+        fallbackBuffer.write(decoded)
+        if (fallbackBuffer.size() >= fallbackExpectedLength) {
+            completeFallbackBinary()
+        }
+    }
+
+    @Suppress("ReturnCount")
+    private fun completeFallbackBinary() {
+        val expected = fallbackExpectedLength
+        var bytes = fallbackBuffer.toByteArray()
+        fallbackBuffer.reset()
+        fallbackExpectedLength = 0
+        if (expected in 0..bytes.size) {
+            bytes = bytes.copyOf(expected)
+        }
+
+        val binaryId = pendingBinaryRequestId
+        if (binaryId != null) {
+            pendingBinaryRequestId = null
+            pendingRequests.remove(binaryId)?.binary?.complete(bytes)
+            return
+        }
+        pendingBatchMeta?.let { meta ->
+            pendingBatchMeta = null
+            activeGeneration?.trySend(
+                GenerationEvent.Batch(
+                    ResultBatch(
+                        blockRowBegin = meta.rowBegin,
+                        blockRowEnd = meta.rowEnd,
+                        blockSize = meta.blockSize,
+                        width = meta.width,
+                        rgba = bytes,
+                    ),
+                ),
+            )
+            return
+        }
+        pendingResultMeta?.let { meta ->
+            pendingResultMeta = null
+            activeGeneration?.trySend(
+                GenerationEvent.Completed(RgbaImage(meta.width, meta.height, bytes)),
+            )
+        }
+    }
+
+    private fun failPending(err: Exception) {
+        val error = CoreException(err.message ?: "evaluate transport failed")
+        pendingRequests.values.forEach { pending ->
+            pending.json.completeExceptionally(error)
+            pending.binary?.completeExceptionally(error)
+        }
+        pendingRequests.clear()
+        pendingBinaryRequestId = null
+        pendingBatchMeta = null
+        pendingResultMeta = null
+        fallbackBuffer.reset()
+        fallbackExpectedLength = 0
+        activeGeneration?.trySend(GenerationEvent.Failed(error.message ?: "evaluate transport failed"))
     }
 
     @Suppress("TooGenericExceptionCaught")
@@ -304,33 +594,48 @@ class JsCoreEngine(
         }
     }
 
-    private fun handleTextMessage(text: String) {
+    private fun handleTextMessage(
+        text: String,
+        allowStep: Boolean = true,
+    ) {
         val json = JSONObject(text)
         when (json.optString("type")) {
             "response" -> handleResponse(json)
             "progress" -> handleProgress(json)
             "batchDone" -> {
+                val length = json.optInt("length", -1)
                 pendingBatchMeta =
                     BatchMeta(
                         rowBegin = json.getInt("row_begin"),
                         rowEnd = json.getInt("row_end"),
                         blockSize = json.getInt("block_size"),
                         width = json.getInt("width"),
+                        length = length,
                     )
+                fallbackExpectedLength = length
+                fallbackBuffer.reset()
             }
             "result" -> {
+                val length = json.optInt("length", -1)
                 pendingResultMeta =
                     ResultMeta(
                         width = json.getInt("width"),
                         height = json.getInt("height"),
+                        length = length,
                     )
+                fallbackExpectedLength = length
+                fallbackBuffer.reset()
             }
             "error" ->
                 activeGeneration?.trySend(
                     GenerationEvent.Failed(json.optString("message", "core execution failed")),
                 )
             "canceled" -> activeGeneration?.trySend(GenerationEvent.Canceled)
-            "stepDone" -> post(JSONObject().put("type", "step"))
+            "stepDone" -> {
+                if (allowStep && messagePort != null) {
+                    postPort(control("step"))
+                }
+            }
             else -> Log.w(LOG_TAG, "unknown message type: ${json.optString("type")}")
         }
     }
@@ -350,7 +655,14 @@ class JsCoreEngine(
             return
         }
         if (json.optBoolean("binary", false)) {
+            val length = json.optInt("length", 0)
             pendingBinaryRequestId = id
+            fallbackExpectedLength = length
+            fallbackBuffer.reset()
+            if (length == 0) {
+                pendingBinaryRequestId = null
+                pendingRequests.remove(id)?.binary?.complete(ByteArray(0))
+            }
             return
         }
         pendingRequests.remove(id)
@@ -438,11 +750,23 @@ class JsCoreEngine(
     private fun readAssetBytes(path: String): ByteArray = context.assets.open(path).use { it.readBytes() }
 
     private fun closeIsolate() {
+        stopPolling()
         messagePort?.close()
         messagePort = null
         isolate?.close()
         isolate = null
         coreVersion = null
+        transport = Transport.MESSAGE_PORT
+        pendingBinaryRequestId = null
+        pendingBatchMeta = null
+        pendingResultMeta = null
+        fallbackBuffer.reset()
+        fallbackExpectedLength = 0
+    }
+
+    private fun stopPolling() {
+        pollJob?.cancel()
+        pollJob = null
     }
 
     override fun close() {
@@ -454,6 +778,7 @@ class JsCoreEngine(
         }
         pendingRequests.clear()
         closeIsolate()
+        pollScope.cancel()
         sandbox?.close()
         sandbox = null
         messageExecutor.shutdown()
@@ -469,17 +794,28 @@ class JsCoreEngine(
         val rowEnd: Int,
         val blockSize: Int,
         val width: Int,
+        val length: Int,
     )
 
     private data class ResultMeta(
         val width: Int,
         val height: Int,
+        val length: Int,
     )
+
+    private enum class Transport {
+        MESSAGE_PORT,
+        NAMED_DATA_EVALUATE,
+        STRING_EVALUATE,
+    }
 
     private companion object {
         const val LOG_TAG = "JsCoreEngine"
         const val TIMEOUT_SECONDS = 30L
         const val REQUEST_TIMEOUT_MS = 60_000L
+        const val ACTIVE_POLL_MS = 16L
+        const val IDLE_POLL_MS = 50L
+        const val INPUT_CHUNK_BYTES = 512 * 1024
         const val CHANNEL_NAME = "core"
         const val GLUE_ASSET = "core/photomosaic_core_wasm.js"
         const val WASM_ASSET = "core/photomosaic_core_wasm_bg.wasm"

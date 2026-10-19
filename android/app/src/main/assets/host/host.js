@@ -89,9 +89,90 @@ if (typeof globalThis.TextEncoder === 'undefined') {
 
 let pmPort = null;
 let pmLastGrid = null;
+let pmNamedDataEnabled = true;
+let pmCurrentInputRef = null;
+const pmInputBuffers = new Map();
+
+// evaluate トランスポート(MessagePort 非対応端末)用の送信キュー。
+// __pmDrain() が 1 エントリずつ JSON 文字列として返す。
+let pmOutbox = [];
+
+/** evaluate の 1 回あたりに返すバイナリの最大バイト数 */
+const PM_CHUNK_BYTES = 512 * 1024;
+
+const PM_BASE64 =
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+function pmBase64(bytes) {
+  const parts = [];
+  let i = 0;
+  while (i + 2 < bytes.length) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    parts.push(
+      PM_BASE64[(n >> 18) & 63] +
+        PM_BASE64[(n >> 12) & 63] +
+        PM_BASE64[(n >> 6) & 63] +
+        PM_BASE64[n & 63]
+    );
+    i += 3;
+  }
+  if (i < bytes.length) {
+    const b0 = bytes[i];
+    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const n = (b0 << 16) | (b1 << 8);
+    parts.push(
+      PM_BASE64[(n >> 18) & 63] +
+        PM_BASE64[(n >> 12) & 63] +
+        (i + 1 < bytes.length ? PM_BASE64[(n >> 6) & 63] : '=') +
+        '='
+    );
+  }
+  return parts.join('');
+}
+
+function pmBase64Decode(text) {
+  if (typeof Uint8Array.fromBase64 === 'function') {
+    return Uint8Array.fromBase64(text);
+  }
+  const clean = text.replace(/=+$/, '');
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let outIndex = 0;
+  let buffer = 0;
+  let bits = 0;
+  for (let i = 0; i < clean.length; i += 1) {
+    const value = PM_BASE64.indexOf(clean[i]);
+    if (value < 0) {
+      throw new Error('invalid base64 input');
+    }
+    buffer = (buffer << 6) | value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[outIndex++] = (buffer >> bits) & 0xff;
+    }
+  }
+  return out.subarray(0, outIndex);
+}
 
 function pmPost(message) {
-  pmPort.postMessage(JSON.stringify(message));
+  if (pmPort) {
+    pmPort.postMessage(JSON.stringify(message));
+  } else {
+    pmOutbox.push({ k: 'json', v: message });
+  }
+}
+
+function pmPostBinary(bytes) {
+  if (pmPort) {
+    pmPort.postMessage(bytes.buffer);
+    return;
+  }
+  for (let offset = 0; offset < bytes.length; offset += PM_CHUNK_BYTES) {
+    pmOutbox.push({
+      k: 'chunk',
+      d: pmBase64(bytes.subarray(offset, offset + PM_CHUNK_BYTES)),
+    });
+  }
 }
 
 function pmRespond(id, payload, error) {
@@ -116,7 +197,7 @@ function pmRespondBinary(id, bytes) {
     binary: true,
     length: bytes.length,
   });
-  pmPort.postMessage(bytes.buffer);
+  pmPostBinary(bytes);
 }
 
 function pmGridToObject(info) {
@@ -153,12 +234,61 @@ function pmNow() {
 }
 
 async function pmConsume(ref) {
-  return new Uint8Array(await android.consumeNamedDataAsArrayBuffer(ref));
+  if (pmNamedDataEnabled) {
+    return new Uint8Array(await android.consumeNamedDataAsArrayBuffer(ref));
+  }
+  const entry = pmInputBuffers.get(ref);
+  if (!entry) {
+    throw new Error('unknown input buffer: ' + ref);
+  }
+  pmInputBuffers.delete(ref);
+  const total = entry.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (total !== entry.length) {
+    throw new Error('input length mismatch: expected ' + entry.length + ', got ' + total);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  entry.chunks.forEach((chunk) => {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return bytes;
+}
+
+function pmHandlePortInput(buffer) {
+  try {
+    if (pmCurrentInputRef === null) {
+      throw new Error('input chunk received without inputBegin');
+    }
+    const entry = pmInputBuffers.get(pmCurrentInputRef);
+    if (!entry) {
+      throw new Error('unknown input buffer: ' + pmCurrentInputRef);
+    }
+    entry.chunks.push(new Uint8Array(buffer));
+  } catch (err) {
+    pmPost({ type: 'error', message: String(err && err.message ? err.message : err) });
+  }
 }
 
 async function pmHandleControl(message) {
   try {
     switch (message.type) {
+      case 'inputBegin': {
+        pmCurrentInputRef = String(message.id);
+        pmInputBuffers.set(pmCurrentInputRef, {
+          length: message.length,
+          chunks: [],
+        });
+        break;
+      }
+      case 'inputChunk': {
+        const entry = pmInputBuffers.get(String(message.id));
+        if (!entry) {
+          throw new Error('unknown input buffer: ' + message.id);
+        }
+        entry.chunks.push(pmBase64Decode(message.data));
+        break;
+      }
       case 'setMainImage': {
         const bytes = await pmConsume(message.dataRef);
         const info = wasm_bindgen.set_main_image(
@@ -219,11 +349,11 @@ async function pmHandleControl(message) {
         break;
       }
       case 'run': {
-        await pmDriveRun(() => wasm_bindgen.begin_run());
+        pmDriveRun(() => wasm_bindgen.begin_run());
         break;
       }
       case 'rematch': {
-        await pmDriveRun(() => wasm_bindgen.begin_rematch());
+        pmDriveRun(() => wasm_bindgen.begin_rematch());
         break;
       }
       case 'step': {
@@ -309,14 +439,16 @@ function pmStep() {
 
   const result = output.result;
   if (result) {
+    const rgba = result.rgba;
     pmPost({
       type: 'batchDone',
       row_begin: result.row_begin,
       row_end: result.row_end,
       block_size: result.block_size,
       width: result.width,
+      length: rgba.length,
     });
-    pmPort.postMessage(result.rgba.buffer);
+    pmPostBinary(rgba);
     result.free();
   }
 
@@ -332,8 +464,9 @@ function pmStep() {
         type: 'result',
         width: pmLastGrid.width,
         height: pmLastGrid.height,
+        length: rgba.length,
       });
-      pmPort.postMessage(rgba.buffer);
+      pmPostBinary(rgba);
     }
     if (pmRunResolve) {
       const resolve = pmRunResolve;
@@ -348,24 +481,56 @@ function pmStep() {
 globalThis.__pmCoreReady = false;
 
 /**
- * コアを初期化し、MessagePort の受信ハンドラを設定してバージョンを返す。
- * @param {string} wasmRef provideNamedData で渡した .wasm の参照名
+ * コアを初期化し、トランスポートを設定してバージョンを返す。
+ * @param {string} wasmSource provideNamedData の参照名、または Base64 文字列
+ * @param {boolean} usePort true なら MessagePort、false なら evaluate トランスポート
+ * @param {boolean} useNamedData true なら named data、false なら入力も Base64
  * @returns {Promise<string>} getVersion() の戻り値
  */
-globalThis.__pmInit = async function (wasmRef) {
+globalThis.__pmInit = async function (wasmSource, usePort, useNamedData) {
   if (typeof WebAssembly === 'undefined') {
     throw new Error('WebAssembly is not available');
   }
-  pmPort = await android.getNamedPort('core');
-  pmPort.onmessage = (event) => {
-    if (typeof event.data === 'string') {
-      pmHandleControl(JSON.parse(event.data));
-    }
-  };
+  pmNamedDataEnabled = Boolean(useNamedData);
+  if (usePort) {
+    pmPort = await android.getNamedPort('core');
+    pmPort.onmessage = (event) => {
+      if (typeof event.data === 'string') {
+        pmHandleControl(JSON.parse(event.data));
+      } else if (event.data instanceof ArrayBuffer) {
+        pmHandlePortInput(event.data);
+      } else if (event.data && typeof event.data.byteLength === 'number') {
+        pmHandlePortInput(event.data);
+      }
+    };
+  } else {
+    pmPort = null;
+  }
 
-  const bytes = await android.consumeNamedDataAsArrayBuffer(wasmRef);
+  const bytes = pmNamedDataEnabled
+    ? await android.consumeNamedDataAsArrayBuffer(wasmSource)
+    : pmBase64Decode(wasmSource);
   const module = await WebAssembly.compile(bytes);
   wasm_bindgen.initSync({ module: module });
   globalThis.__pmCoreReady = true;
   return wasm_bindgen.get_version();
+};
+
+/**
+ * evaluate トランスポート用の制御入口。
+ * 制御 JSON を文字列で受け取り、応答・進捗は pmOutbox に積む。
+ */
+globalThis.__pmHandleControl = async function (json) {
+  await pmHandleControl(JSON.parse(json));
+};
+
+/**
+ * evaluate トランスポート用の送信キュー取り出し。
+ * 1 回につき 1 エントリだけ返す(バイナリはチャンク分割済み)。
+ */
+globalThis.__pmDrain = function () {
+  if (pmOutbox.length === 0) {
+    return JSON.stringify({ k: 'empty' });
+  }
+  return JSON.stringify(pmOutbox.shift());
 };

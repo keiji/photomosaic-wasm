@@ -4,7 +4,7 @@
 |---|---|
 | 性格 | Web アプリが一定整った段階(M4: 論理 API 凍結以降)での Android アプリ着手手順と、コア インターフェースへのフィードバックの流れ |
 | 対象 | Android アプリ実装者、コア実装者 |
-| 実行基盤 | **AndroidX JavaScript Engine(androidx.javascriptengine)のサンドボックス上で、Web と同一の WASM コアを実行する。ホストとの双方向通信は MessagePort API を使用する** |
+| 実行基盤 | **AndroidX JavaScript Engine(androidx.javascriptengine)のサンドボックス上で、Web と同一の WASM コアを実行する。ホストとの双方向通信は MessagePort API を第一選択とし、機能非対応時は named data + evaluate / Base64 evaluate へフォールバックする** |
 
 ## 1. 全体の進め方
 
@@ -48,6 +48,7 @@
 - `JavaScriptSandbox` をアプリ(編集画面)起動時に接続し、以後使い回す。サンドボックスはアプリとは別プロセスで動くため、処理中も UI スレッドを塞がない。
 - 1 セッションにつき 1 つの `JavaScriptIsolate` を使用する。isolate の初期化時に、`assets/core/` から読み込んだグルーシップ(DOM 非依存の orchestration スクリプト)と .wasm を評価してコアを起動する。
 - 単発の制御は `evaluateJavaScriptAsync`、継続的な双方向通信は **MessagePort API**(`postMessage` / メッセージ受信コールバック)を使用する。
+- MessagePort が使えない場合は、機能フラグを確認して段階的にフォールバックする(§3.3)。MessagePort → named data + evaluate → Base64 文字列の evaluate、の順で選ぶ。MessagePort 経路では named data が無い場合も ArrayBuffer 入力で動作する。
 - 画面破棄時は MessagePort を閉じて isolate を close し、リソースを解放する。サンドボックスプロセスの死亡に備えて再接続処理を持つ。
 
 ### 3.2 データフロー
@@ -55,20 +56,22 @@
 ```
 Kotlin
   │ ①Photo Picker → Uri → デコード(EXIF 反映)→ 正規化縮小 → RGBA
-  │ ②named data 提供 API(バイト配列)で RGBA をサンドボックスへ提供
-  │ ③MessagePort で制御メッセージ(JSON)を送信: setMainImage / setBlockSize / addTile / run / rematch / cancel(§3.3 の一式)
+  │ ②選択したトランスポートで RGBA をサンドボックスへ提供
+  │    MessagePort / named data: バイト配列を直接提供
+  │    Base64 evaluate: inputBegin + inputChunk でチャンク転送
+  │ ③制御メッセージ(JSON)を送信: setMainImage / setBlockSize / addTile / run / rematch / cancel(§3.3 の一式)
   ▼
 ホスト JS(サンドボックス内)
   │ ④コア: setMainImage / addTile / begin_run + step_run(バッチ処理 + 進捗)
-  │ ⑤進捗・部分結果を MessagePort へ postMessage(JSON)
+  │ ⑤進捗・部分結果を MessagePort または evaluate outbox へ返す
   ▼
-Kotlin(受信コールバック → callbackFlow → StateFlow → Compose)
-  │ ⑥完了: exportImage の RGBA(named data)を受領
+Kotlin(MessagePort 受信コールバック、または __pmDrain ポーリング → callbackFlow → StateFlow → Compose)
+  │ ⑥完了: exportImage の RGBA を受領
   │ ⑦Bitmap 化 → PNG エンコード → MediaStore 保存
 ```
 
 - 画像のデコード・縮小・PNG エンコードは Kotlin 側(プラットフォーム API)が担当する。サンドボックスには DOM/Canvas がないため、ホスト JS はピクセル配列の計算とメッセージングに専念する。
-- 大容量データをメッセージ文字列に含めない。RGBA などのバイト列は named data で渡し、メッセージは参照(dataRef)のみを持つ。
+- 大容量データをメッセージ文字列に含めない。MessagePort / named data 経路では RGBA などのバイト列を直接渡し、メッセージは参照(dataRef)のみを持つ。Base64 evaluate 経路では 512 KiB 単位のチャンクに分割する。
 
 ### 3.3 メッセージプロトコル(概要)
 
@@ -76,17 +79,21 @@ control メッセージの種別は、詳細設計書 2 章で凍結した論理
 
 | 種別 | 方向 | ペイロード(JSON) |
 |---|---|---|
-| control | Kotlin → JS | `{type: "setMainImage" \| "setBlockSize" \| "getBlockMeanColors" \| "addTile" \| "removeTile" \| "clearTiles" \| "clearMainImage" \| "getConfig" \| "setConfig" \| "run" \| "rematch" \| "step" \| "cancel", id?, dataRef?, meta?, config?}` |
-| response | JS → Kotlin | `{type: "response", id, ok, grid?, tile?, config?, binary?, length?, error?}`(binary 応答は JSON の直後に ArrayBuffer) |
+| control | Kotlin → JS | `{type: "setMainImage" \| "setBlockSize" \| "getBlockMeanColors" \| "addTile" \| "removeTile" \| "clearTiles" \| "clearMainImage" \| "getConfig" \| "setConfig" \| "run" \| "rematch" \| "step" \| "cancel", id, dataRef?, meta?, config?}` |
+| inputBegin / inputChunk | Kotlin → JS | MessagePort のバイナリ入力、または Base64 evaluate 経路。`{type: "inputBegin", id: "main-1", length}` の後に、MessagePort では ArrayBuffer、Base64 evaluate では `{type: "inputChunk", id: "main-1", data: "<base64>"}` を送る。Base64 チャンクは 512 KiB 以下 |
+| response | JS → Kotlin | `{type: "response", id, ok, grid?, tile?, config?, binary?, length?, error?}`(binary 応答は JSON の直後に ArrayBuffer、または Base64 チャンク) |
 | progress | JS → Kotlin | `{type: "progress", phase_code, phase_ratio, overall_ratio, assigned_blocks, total_blocks}`(コアの ProgressEvent のフィールド名に一致。文言化は Kotlin 側リソースで行う) |
-| batchDone | JS → Kotlin | `{type: "batchDone", row_begin, row_end, block_size, width}` の直後に該当範囲の合成済み RGBA(ArrayBuffer) |
-| result | JS → Kotlin | `{type: "result", width, height}` の直後に完成画像 RGBA(ArrayBuffer) |
+| batchDone | JS → Kotlin | `{type: "batchDone", row_begin, row_end, block_size, width, length}` の直後に該当範囲の合成済み RGBA(ArrayBuffer または Base64 チャンク) |
+| result | JS → Kotlin | `{type: "result", width, height, length}` の直後に完成画像 RGBA(ArrayBuffer または Base64 チャンク) |
 | stepDone | JS → Kotlin | `{type: "stepDone"}`(1 バッチ完了。Kotlin は `step` を返して次バッチを駆動する) |
 | error / canceled | JS → Kotlin | `{type: "error", message}` / `{type: "canceled"}` |
 
-- Kotlin → JS の RGBA は named data(`provideNamedData`)で渡し、メッセージには `dataRef` のみを含める。JS → Kotlin には named data の consume API が無いため、ArrayBuffer を MessagePort で送る。
-- 正確な API 名・サイズ上限は androidx.javascriptengine の公式ドキュメントを正とし、A0 で実機確認の上、本書と詳細設計書へ反映する。
-- S2 の操作(ブロックサイズスライダー・タイル追加/削除の差分再マッチ・設定変更)を UI 仕様どおりに成立させるため、control 種別は凍結論理 API と同一の一式を用意する。進捗・部分結果の通知はバッチ駆動(`begin_run` / `step_run`)をホスト JS 内で担い、`step_run` の戻り値(progress / result)を MessagePort メッセージへ変換する。サンドボックスに `setTimeout` が無いため、バッチ境界は `stepDone` → `step` の往復で作る。
+- MessagePort 経路: Kotlin → JS は named data が使える場合 `provideNamedData` で渡し、メッセージには `dataRef` のみを含める。named data が無い場合は `inputBegin` の後に ArrayBuffer を MessagePort で送る。JS → Kotlin は JSON の直後に ArrayBuffer を MessagePort で送る。
+- named data + evaluate 経路: 入力は `provideNamedData`、出力は `evaluateJavaScriptAsync("__pmDrain()")` のポーリングで受ける。JS は応答・進捗・バイナリを outbox に積み、バイナリは 512 KiB 単位の Base64 チャンクにする。
+- Base64 evaluate 経路: named data も MessagePort も使わない場合。入力は `inputBegin` + `inputChunk`、出力は named data + evaluate 経路と同じ outbox / Base64 チャンクを使う。
+- evaluate 経路の制御は `__pmHandleControl("<JSON>")`、受信は `__pmDrain()` を 16〜50ms 間隔でポーリングする。`stepDone` を受けたら `step` を送る。
+- 正確な API 名・サイズ上限は androidx.javascriptengine の公式ドキュメントを正とし、A0/A2-2 で実機確認の上、本書と詳細設計書へ反映する。
+- S2 の操作(ブロックサイズスライダー・タイル追加/削除の差分再マッチ・設定変更)を UI 仕様どおりに成立させるため、control 種別は凍結論理 API と同一の一式を用意する。進捗・部分結果の通知はバッチ駆動(`begin_run` / `step_run`)をホスト JS 内で担い、`step_run` の戻り値(progress / result)をメッセージへ変換する。サンドボックスに `setTimeout` が無いため、バッチ境界は `stepDone` → `step` の往復で作る。
 
 ## 4. プロジェクトセットアップ(A0)
 
@@ -106,7 +113,7 @@ control メッセージの種別は、詳細設計書 2 章で凍結した論理
 - Detekt 1.23.8 は JDK 25 では起動できないため、Gradle は JDK 21 で実行する(CI も Temurin 21)。`jvmToolchain(21)` を設定済み。
 - 確認した API: `JavaScriptSandbox.isSupported()` は引数なし。`JS_FEATURE_WASM_COMPILATION` / `JS_FEATURE_PROMISE_RETURN` / `JS_FEATURE_PROVIDE_CONSUME_ARRAY_BUFFER` / `JS_FEATURE_CONSOLE_MESSAGING` / `JS_FEATURE_MESSAGE_PORTS` は実在。`JavaScriptConsoleCallback` で console 出力を logcat へ転送する。
 - グルーは `wasm-pack --target no-modules` で生成し、`buildCoreGlue` → `SyncCoreAssets` で `assets/core/` へ取り込む。AGP 9 では SourceSet に Provider を渡せないため、Variant API の `addGeneratedSourceDirectory` を使う。
-- 実行経路: Kotlin が `host/host.js` → グルー → `__pmInit(wasmRef)` の順に評価。`.wasm` は `provideNamedData` で渡し、ホスト JS が `android.consumeNamedDataAsArrayBuffer` → `WebAssembly.compile` → `wasm_bindgen.initSync({ module })` → `get_version()` を呼ぶ。
+- 実行経路: Kotlin が `host/host.js` → グルー → `__pmInit(wasmSource, usePort, useNamedData)` の順に評価。named data 経路では `.wasm` を `provideNamedData` で渡し、ホスト JS が `android.consumeNamedDataAsArrayBuffer` → `WebAssembly.compile` → `wasm_bindgen.initSync({ module })` → `get_version()` を呼ぶ。Base64 evaluate 経路では `.wasm` を Base64 文字列として渡す。
 - isolate には `TextDecoder` / `TextEncoder` が無いため、`host.js` で最小限の UTF-8 ポリフィルを定義してからグルーを評価する(初回実行で `TextDecoder is not defined` を確認し対処)。
 - 検証結果: `:app:assembleDebug` / `:app:detekt` / `:app:testDebugUnitTest`(5 件)/ `:app:lintDebug` が成功。android-36 (google_apis_playstore, x86_64) エミュレータで「JavaScript エンジン: 対応」「WebAssembly: 利用可能」「コアバージョン: photomosaic-core 0.1.0」を表示。`aapt dump permissions` で `INTERNET` が無いことを確認。
 
@@ -160,13 +167,26 @@ progress.collectAsState().value.let { event ->
 
 ### 6.1 A2 実施結果
 
-- プロトコル(`core/CoreModels.kt` / `core/JsCoreEngine.kt`): 制御は MessagePort の文字列 JSON、Kotlin → JS の RGBA は named data(`dataRef` のみを送る)、JS → Kotlin の部分結果・完成画像は JSON の直後に ArrayBuffer を送る方式で実装した。要求と応答は `id` で対応付け、60 秒でタイムアウトする。
-- バッチ駆動(`assets/host/host.js`): サンドボックスに `setTimeout` が無いため、`begin_run` / `begin_rematch` 後の 1 バッチごとに `stepDone` を送り、Kotlin が `step` を返すハンドシェイクでバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。進捗は `progress`、部分結果は `batchDone` + ArrayBuffer、完成は `result` + ArrayBuffer として送る。
+- プロトコル(`core/CoreModels.kt` / `core/JsCoreEngine.kt`): 制御は文字列 JSON、Kotlin → JS の RGBA は named data(`dataRef` のみを送る)、JS → Kotlin の部分結果・完成画像は JSON の直後に ArrayBuffer を送る方式で実装した。要求と応答は `id` で対応付け、60 秒でタイムアウトする。A2-2 で MessagePort 非対応時の evaluate フォールバックを追加した(§6.2)。
+- バッチ駆動(`assets/host/host.js`): サンドボックスに `setTimeout` が無いため、`begin_run` / `begin_rematch` 後の 1 バッチごとに `stepDone` を送り、Kotlin が `step` を返すハンドシェイクでバッチ境界を作る。境界で `cancel`・設定変更を受け付ける。進捗は `progress`、部分結果は `batchDone` + バイナリ、完成は `result` + バイナリとして送る。
 - 部分描画: `batchDone` の行範囲をグリッド全体の Bitmap へ `Canvas.drawBitmap` で転写し、`previewRevision` で Compose の再描画を促す。完成時は完成 RGBA を Bitmap 化して保存・共有に使う。
 - S2 UI(`ui/editor/EditorScreen.kt` / `EditorViewModel.kt`): プレビュー(タップでメイン画像変更)、ブロックサイズ(8〜128px、300ms デバウンス)、メイン画像ブレンド(0〜0.8)、色補正(0〜1.0)、重複閾値(0.5〜8.0)、進捗バー(割当/全体・フェーズ・開閉)、キャンセル、構成画像の追加/削除(編集中は差分再マッチ)、保存/共有、戻る(全状態クリア)を実装した。保存は完成時のみ有効。API 26〜28 では保存前に `WRITE_EXTERNAL_STORAGE` を要求する。
 - コア共有(`MainActivity.kt` / `StartupViewModel.kt`): 起動検査と編集画面で同一の `JsCoreEngine` を Activity スコープの `StartupViewModel` 経由で共有し、画面遷移でサンドボックスを作り直さない。
-- 検証: `compileDebugKotlin` / `compileDebugAndroidTestKotlin` / `detekt` / `ktlint` / `lintDebug` / ユニットテスト 13 件が成功。実機テストは 15 件中 14 件成功・1 件スキップ。スキップした `JsCoreEngineTest` は、検証用エミュレータの WebView 133/134 が `JS_FEATURE_MESSAGE_PORTS` を公開しないため `Assume` でスキップした(AndroidX JavaScriptEngine の `createMessageChannel` も "Sandbox does not support MessagePorts" を返す)。ホスト JS のプロトコルは Node.js 上で、モックに加えて実際の `photomosaic_core_wasm.js` / `.wasm` を使って検証した(named data 消費、`stepDone` → `step`、progress/batchDone/result の JSON + ArrayBuffer、キャンセル、完成 RGBA のサイズまで確認)。MessagePort 対応 WebView を搭載した実機での生成確認は未実施。
-- 既知の制約: MessagePort 非対応端末では起動検査が `Failed("MessagePort is not supported")` となり、A0 の失敗案内に原因メッセージを表示する。
+- 検証: `compileDebugKotlin` / `compileDebugAndroidTestKotlin` / `detekt` / `ktlint` / `lintDebug` / ユニットテスト 13 件が成功。実機テストは 15 件中 14 件成功・1 件スキップ(A2 時点)。スキップした `JsCoreEngineTest` は、検証用エミュレータの WebView 133/134 が `JS_FEATURE_MESSAGE_PORTS` を公開しないため `Assume` でスキップした。A2-2 でスキップを解除し、named data + evaluate フォールバック経路で生成できることを確認した(§6.2)。
+- 既知の制約: MessagePort 非対応端末では evaluate フォールバックを使うため、MessagePort 経路より転送コストが大きい。Base64 evaluate 経路はさらに転送コストが大きい。
+
+### 6.2 A2-2 実施結果(Graceful Degradation、2026-10-19)
+
+- 機能判定: `JavaScriptSandbox.isFeatureSupported` で WASM / MessagePort / named data / Promise / `EVALUATE_WITHOUT_TRANSACTION_LIMIT` / isolate max heap を起動時に確認し、結果を logcat に記録する。
+- トランスポート選択:
+  1. `JS_FEATURE_MESSAGE_PORTS` が使える場合は MessagePort 経路。入力は named data が使えれば `provideNamedData`、無ければ `inputBegin` + ArrayBuffer、出力は ArrayBuffer。
+  2. MessagePort が無い場合は named data + evaluate 経路。入力は `provideNamedData`、出力は `__pmDrain()` のポーリングで受ける。
+  3. named data も無い場合は Base64 evaluate 経路。入力は `inputBegin` / `inputChunk`、出力は Base64 チャンクで受ける。
+- MessagePort の機能フラグが true でも `createMessageChannel` が失敗する端末があるため、例外時は named data + evaluate へ落とす。
+- evaluate 経路は `__pmHandleControl(json)` で制御を送り、JS の outbox を `__pmDrain()` で 16ms(処理中)/50ms(待機中)間隔でポーリングする。`batchDone` / `result` / binary response には `length` を付け、512 KiB 単位の Base64 チャンクが揃った時点で完了とする。
+- 検証環境の WebView 機能値(android-36 エミュレータ、WebView 133): `wasm=true`, `messagePort=false`, `provideNamedData=true`, `promise=true`, `evaluateWithoutTransactionLimit=true`, `isolateMaxHeap=true`。このため実機テストは named data + evaluate 経路で実行した。
+- 検証: `JsCoreEngineTest` のスキップを解除し、`start` → `setMainImage` → `getBlockMeanColors` → `addTile` → `run` → `Completed` が成功。Node.js 上では実 `.wasm` を使い、MessagePort + named data / MessagePort + ArrayBuffer 入力 / named data + evaluate / Base64 evaluate の 4 経路を検証した(`/tmp/opencode/host_real_core_test.js`, `host_messageport_binaryinput_test.js`, `host_fallback_test.js`, `host_string_fallback_test.js`)。`detekt` / `ktlint` も成功。
+- 既知の制約: Base64 evaluate 経路は Binder のトランザクション上限を避けるため 512 KiB チャンクに分割する。`EVALUATE_WITHOUT_TRANSACTION_LIMIT` が無い端末でも、このチャンクサイズ(Base64 後 約 683 KiB)は 1 MiB 未満に収まる。非常に大きな画像では転送時間が増える。
 
 ## 7. 品質確認(A3)
 
@@ -203,7 +223,8 @@ Android 実装で典型的に浮上する課題と、その扱い:
 
 - [x] A0: セットアップ、javascriptengine 追加、isSupported / WASM 検査、`getVersion()` 表示
 - [x] A1: Photo Picker・Kotlin デコード・保存・共有
-- [x] A2: MessagePort 連携(進捗・部分描画・キャンセル)、UI を Web 仕様どおりに実装(実機の生成確認は MessagePort 対応 WebView で未実施)
+- [x] A2: MessagePort 連携(進捗・部分描画・キャンセル)、UI を Web 仕様どおりに実装
+- [x] A2-2: WebView 機能判定と Graceful Degradation(MessagePort → named data + evaluate → Base64 evaluate)
 - [ ] A3: 品質確認(オフライン・決定性・性能・転送・メモリ・回転・プロセス死)
 - [ ] A4: フィードバックの運用開始(課題の仕分けルールをチームで共有)
 
@@ -213,5 +234,5 @@ Android 実装で典型的に浮上する課題と、その扱い:
 - 進捗イベントの全フィールドと発火間隔
 - キャンセルの意味論(バッチ境界・部分結果の保持)
 - 設定 JSON のスキーマ(閾値パラメータ一式)
-- メッセージプロトコル(control / progress / batchDone / result / error)と named data 参照(dataRef)の取り決め
+- メッセージプロトコル(control / progress / batchDone / result / error)と named data 参照(dataRef)、および evaluate フォールバック時の outbox / `length` / `inputBegin`・`inputChunk` の取り決め
 - コアバージョンの表記と不一致時の UI 挙動

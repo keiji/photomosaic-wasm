@@ -8,11 +8,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** MessagePort 連携(A2)の実機テスト。 */
+/** MessagePort / evaluate フォールバック連携(A2-2)の実機テスト。 */
 @RunWith(AndroidJUnit4::class)
 class JsCoreEngineTest {
     @Test
@@ -21,14 +20,6 @@ class JsCoreEngineTest {
             val engine = JsCoreEngine(ApplicationProvider.getApplicationContext())
             try {
                 val startup = engine.start()
-                if (startup is CoreStartupResult.Failed &&
-                    startup.message.contains("MessagePort")
-                ) {
-                    assumeTrue(
-                        "MessagePort is unsupported by this WebView; integration test skipped",
-                        false,
-                    )
-                }
                 assertTrue("startup failed: $startup", startup is CoreStartupResult.Ready)
                 val ready = startup as CoreStartupResult.Ready
                 assertTrue(ready.coreVersion.isNotBlank())
