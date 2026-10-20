@@ -1,5 +1,11 @@
 # photomosaic-wasm
 
+[![CI](https://github.com/keiji/photomosaic-wasm/actions/workflows/ci.yml/badge.svg)](https://github.com/keiji/photomosaic-wasm/actions/workflows/ci.yml)
+[![Deploy GitHub Pages](https://github.com/keiji/photomosaic-wasm/actions/workflows/pages.yml/badge.svg)](https://github.com/keiji/photomosaic-wasm/actions/workflows/pages.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+<img src="img/screenshot1.png" width="360" alt="フォトモザイク メーカーのスクリーンショット">
+
 ユーザーが持ち込んだ 1 枚の画像(メイン画像)を小さなブロックに分割し、各ブロックにマッチする小画像(構成画像)を配置してフォトモザイクを生成するアプリケーション群。
 
 - **共通コア**: Rust(WASM にコンパイル)。Web / Android で同一の .wasm を実行
@@ -8,6 +14,11 @@
 - **Android アプリ**: Kotlin + Jetpack Compose(M4 以降の着手。`androidx.javascriptengine` 上で同一の .wasm を実行)
 
 設計ドキュメントは [docs/README.md](./docs/README.md) を参照。
+
+## デモ
+
+- [WASM 版](https://keiji.github.io/photomosaic-wasm/)
+- [純 TypeScript 版](https://keiji.github.io/photomosaic-wasm/index_js.html)
 
 ## 完全オフライン
 
@@ -50,8 +61,8 @@ npm run dev
 
 同じ UI を 2 つのコア実装で提供する。性能比較や WASM 非対応環境での動作確認に使う。
 
-- WASM 版: `https://keiji.github.io/photomosaic-wasm/`(`index.html`)
-- 純 TypeScript 版: `https://keiji.github.io/photomosaic-wasm/index_js.html`(`index_js.html`)
+- WASM 版: [`index.html`](https://keiji.github.io/photomosaic-wasm/)
+- 純 TypeScript 版: [`index_js.html`](https://keiji.github.io/photomosaic-wasm/index_js.html)
 
 純 TypeScript 版は Rust コア(`core/src/*.rs`)を `web/src/core/js/` へ移植したもので、WASM をロードしない。両ページともコアを Web Worker で実行し、Service Worker により完全オフラインで動作する。
 
@@ -117,7 +128,7 @@ node tools/memory-benchmark.mjs \
 
 Web アプリは GitHub Pages のプロジェクトページとして公開する。
 
-- URL: `https://keiji.github.io/photomosaic-wasm/`
+- URL: <https://keiji.github.io/photomosaic-wasm/>
 - 実行トリガー: 手動実行(`workflow_dispatch`)または `v*` タグの push
 - ワークフロー: `.github/workflows/pages.yml`
 - リポジトリが private でも、公開された Pages サイトは public である
@@ -126,4 +137,5 @@ Web アプリは GitHub Pages のプロジェクトページとして公開す�
 
 ## ライセンス
 
-MIT
+本プロジェクトは [MIT ライセンス](./LICENSE) の下で公開されている。
+Copyright (c) 2026 ARIYAMA Keiji

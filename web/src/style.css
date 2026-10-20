@@ -63,6 +63,20 @@ body {
   flex: 1;
 }
 
+.repo-link {
+  flex: none;
+  color: var(--color-accent);
+  font-size: 0.85rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.repo-link:hover,
+.repo-link:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
