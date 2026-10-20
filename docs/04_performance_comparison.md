@@ -273,3 +273,4 @@ Worker 実行中は、メインスレッドへ進捗率を即時反映しない�
 - `opt-level = 3` を採用し、`core-wasm/Cargo.toml` と `web/src/wasm/` を更新済み。
   CI と GitHub Pages も同じ設定で WASM をビルドする。
 - 真のマルチスレッド WASM は配信ヘッダーと P3 の逐次依存の制約が大きい。
+- メモリフットプリントの比較は [05_memory_comparison.md](./05_memory_comparison.md) を参照。

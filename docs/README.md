@@ -8,6 +8,7 @@
 | [02_basic_design.md](./02_basic_design.md)                     | 基本設計書。画面遷移、画面構成、フォトモザイクの具体的処理を除いた処理の流れ、進捗表示と保存の仕様。           |
 | [03_detailed_design.md](./03_detailed_design.md)               | 詳細設計書。モジュール分割、フォトモザイク処理の具体的な流れ、閾値などのパラメータ一覧、進捗コールバック設計。 |
 | [04_performance_comparison.md](./04_performance_comparison.md) | JS / WASM の速度比較。初期計測、WASM の速度最適化、rAF 省略時の差、Web Worker 実装とブラウザ実測。             |
+| [05_memory_comparison.md](./05_memory_comparison.md)           | JS / WASM のメモリフットプリント比較。計測方法、ブラウザ実測、WASM 採用判断、再計測用スクリプトの使い方。      |
 | [handoff/](./handoff/)                                         | 実装に当たってのハンドオフ資料(下記)。                                                                         |
 
 ## ハンドオフ資料(handoff/ 配下)
@@ -25,7 +26,8 @@
 
 1. プロジェクトの参加者: `01` → `02` → `03`
 2. 実装着手者: `01`〜`03` を読んだ上で `handoff/03`(言語選定) → `handoff/02`(ビルド手順) → `handoff/04`(開発ループ) → `handoff/05`(計測) → `handoff/06`(Android)
-3. アルゴリズムの背景を知りたい場合: `handoff/01`
+3. 性能比較: `04`(速度) → `05`(メモリ)
+4. アルゴリズムの背景を知りたい場合: `handoff/01`
 
 ## 用語の対応
 

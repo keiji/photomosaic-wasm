@@ -93,6 +93,26 @@ npm run build       # 型チェック + 本番ビルド(dist/ へ出力)
 
 CI(.github/workflows/ci.yml)はプッシュ毎に cargo fmt/clippy/test + wasm-pack build + バイナリサイズチェック(≤ 500 KB)+ Web 側の全検査を実行する。
 
+### メモリフットプリント比較
+
+JS 版と WASM 版のメモリ保持量を比較するスクリプトを `tools/memory-benchmark.mjs` に置いている。
+`web/dist` を COOP/COEP 付きでローカル配信し、ヘッドレス Chrome で両ページを生成して
+`performance.measureUserAgentSpecificMemory()` を計測する。
+
+```bash
+cd web
+npm run build
+cd ..
+
+node tools/memory-benchmark.mjs \
+  --main /path/to/main.png \
+  --tiles /path/to/tiles \
+  --tile-limit 1000
+```
+
+結果は JSON で標準出力へ出る。`--out result.json` でファイルにも保存できる。
+計測結果と注意点は [docs/05_memory_comparison.md](./docs/05_memory_comparison.md) を参照。
+
 ### GitHub Pages への公開
 
 Web アプリは GitHub Pages のプロジェクトページとして公開する。
