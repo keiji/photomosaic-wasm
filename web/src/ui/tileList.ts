@@ -155,6 +155,7 @@ export class TileList {
     image.src = thumbUrl;
     image.alt = '';
     image.loading = 'lazy';
+    image.decoding = 'async';
 
     const remove = document.createElement('button');
     remove.type = 'button';

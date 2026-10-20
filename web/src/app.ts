@@ -19,7 +19,13 @@
  *     キャンセル後に最新状態で再開する
  */
 import './style.css';
-import { InvalidFileError, loadMainImage, loadTile } from './io/imageLoader';
+import {
+  createTileThumbnailUrl,
+  filterImageFiles,
+  InvalidFileError,
+  loadMainImage,
+  loadTile,
+} from './io/imageLoader';
 import { buildDownloadFilename, downloadBlob, encodeImage } from './io/exporter';
 import type { CoreBridge, GridInfo, MosaicConfig } from './core/types';
 import { AppStore } from './state/store';
@@ -45,6 +51,36 @@ function registerServiceWorker(): void {
 
 /** タイル追加処理の 1 バッチあたりの枚数(バッチ間で UI に制御を返す) */
 const TILE_BATCH_SIZE = 8;
+
+/** 1 バッチ内で同時にデコードする枚数(デコードの並列化で待ち時間を短縮する) */
+const TILE_DECODE_CONCURRENCY = 4;
+
+/**
+ * 配列の要素を指定した並列度で処理し、元の順序の結果を返す。
+ * 各ワーカーは空き次第次の要素を取り、1 要素の完了を待たずに次を開始する。
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const item = items[index];
+      if (item === undefined) {
+        continue;
+      }
+      results[index] = await fn(item);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 function requireElement<T extends HTMLElement>(selector: string): T {
   const el = document.querySelector<T>(selector);
@@ -323,8 +359,19 @@ export async function startApp(
   let loadingDone = 0;
   let activeLoads = 0;
 
-  const addTileFiles = async (files: File[]): Promise<void> => {
-    if (files.length === 0) return;
+  const addTileFiles = async (rawFiles: File[]): Promise<void> => {
+    if (rawFiles.length === 0) return;
+    // 総数を数える前に画像以外のファイルを除外する。JSON やテキストを
+    // 1000 枚ドロップしても、進捗の分母が実際の画像枚数になる。
+    const files = filterImageFiles(rawFiles);
+    if (files.length === 0) {
+      showError(messages.errorInvalidFile);
+      return;
+    }
+    const ignored = rawFiles.length - files.length;
+    if (ignored > 0) {
+      console.info(`ignored ${ignored} non-image file(s)`);
+    }
     clearError();
     progress.setPhase(messages.phaseTileAnalyze);
     loadingTotal += files.length;
@@ -335,30 +382,58 @@ export async function startApp(
     let rejected = 0;
     let guardExceeded = false;
 
-    // 大量追加でも UI が固まらないよう、小バッチごとに制御を返す(handoff/04 M3)
+    // 大量追加でも UI が固まらないよう、小バッチごとに制御を返す(handoff/04 M3)。
+    // バッチ内ではデコードとサムネイル生成を並列化し、コアへの登録は順序を保って行う。
     for (let start = 0; start < files.length; start += TILE_BATCH_SIZE) {
       const batch = files.slice(start, start + TILE_BATCH_SIZE);
-      for (const file of batch) {
+      const results = await mapWithConcurrency(batch, TILE_DECODE_CONCURRENCY, async (file) => {
         if (guardExceeded) {
-          rejected += 1;
-          loadingDone += 1;
-          continue;
+          return { status: 'skipped' as const };
         }
         try {
           const thumbs = await loadTile(file);
+          // 一覧には元ファイルではなく、コアへ渡した長辺 64px の compose 画像から
+          // 作った小さなサムネイルを使う(展開時のフル解像度デコードを避ける)
+          const url = await createTileThumbnailUrl(thumbs.compose);
+          return { status: 'ready' as const, thumbs, url };
+        } catch (error) {
+          return { status: 'failed' as const, error };
+        }
+      });
+
+      for (const result of results) {
+        if (guardExceeded || result.status === 'skipped') {
+          if (result.status === 'ready') {
+            URL.revokeObjectURL(result.url);
+          }
+          rejected += 1;
+          loadingDone += 1;
+          tileList.setLoadingProgress(loadingDone, loadingTotal);
+          continue;
+        }
+
+        if (result.status === 'failed') {
+          console.error('tile load failed', result.error);
+          rejected += 1;
+          loadingDone += 1;
+          tileList.setLoadingProgress(loadingDone, loadingTotal);
+          continue;
+        }
+
+        try {
           const id = nextTileId;
           nextTileId += 1n;
-          const info = await core.addTile(id, thumbs.feature, thumbs.compose);
-          const url = URL.createObjectURL(file);
-          tileUrls.set(info.id, url);
-          tileList.addTile(info.id, url);
+          const info = await core.addTile(id, result.thumbs.feature, result.thumbs.compose);
+          tileUrls.set(info.id, result.url);
+          tileList.addTile(info.id, result.url);
           added += 1;
         } catch (err) {
+          URL.revokeObjectURL(result.url);
           if (err instanceof Error && err.message.includes('memory guard exceeded')) {
             // メモリガード超過(詳細設計書 5 章 memory_guard): 以降の追加を停止する
             guardExceeded = true;
           } else {
-            console.error('tile load failed', err);
+            console.error('tile add failed', err);
             rejected += 1;
           }
         }

@@ -2,11 +2,53 @@ import { describe, expect, it } from 'vitest';
 import {
   boxResize,
   composeThumbSize,
+  filterImageFiles,
+  isImageFileName,
   MAIN_MAX_EDGE,
   normalizeSize,
   TILE_COMPOSE_THUMB_MAX,
   TILE_FEATURE_THUMB,
 } from './imageLoader';
+
+describe('isImageFileName(ファイル名による画像判定)', () => {
+  it('一般的な画像拡張子を大文字小文字を問わず受け付ける', () => {
+    for (const name of [
+      'photo.jpg',
+      'photo.JPEG',
+      'image.png',
+      'animation.gif',
+      'picture.webp',
+      'scan.tiff',
+      'phone.heic',
+      'vector.svg',
+    ]) {
+      expect(isImageFileName(name)).toBe(true);
+    }
+  });
+
+  it('画像以外の拡張子・拡張子なしを拒否する', () => {
+    for (const name of ['data.json', 'notes.txt', 'archive.tar.gz', 'README', 'image.']) {
+      expect(isImageFileName(name)).toBe(false);
+    }
+  });
+});
+
+describe('filterImageFiles(読み込み総数の事前フィルタ)', () => {
+  it('画像ファイルだけを元の順序で残す', () => {
+    const files = [
+      new File([], 'a.jpg'),
+      new File([], 'b.json'),
+      new File([], 'c.png'),
+      new File([], 'd.txt'),
+    ];
+    expect(filterImageFiles(files).map((file) => file.name)).toEqual(['a.jpg', 'c.png']);
+  });
+
+  it('すべて画像以外なら空配列を返す', () => {
+    const files = [new File([], 'a.json'), new File([], 'b.txt')];
+    expect(filterImageFiles(files)).toEqual([]);
+  });
+});
 
 describe('normalizeSize(正規化: 詳細設計書 5 章 main_max_edge)', () => {
   it('上限以内の画像はそのまま(scaled: false)', () => {
