@@ -241,7 +241,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
         improve_margin: 1.0,
         duplicate_de: 2.0,
         duplicate_detail: 4.0,
-        usage_cap: 4,
+        usage_cap: 1,
         no_reuse: true,
         color_correct: 0.85,
         main_blend: 0.2,
@@ -579,7 +579,8 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       try {
         // 5 ブロック行を 4+1 に分ける(row_batch=4)。1 バッチ目でマッチを止めて
         // 差分再マッチ(FillUnmatched)を発生させる
-        wasm.set_config(JSON.stringify({ ...JSON.parse(saved), row_batch: 4 }));
+        // usage ペナルティの連続性を検証するため、ローリングの一巡制限を外す
+        wasm.set_config(JSON.stringify({ ...JSON.parse(saved), row_batch: 4, usage_cap: 0 }));
         wasm.set_main_image(twoToneMain(), 72, 120);
         // t1: A から ΔE 約 2.5 / B から約 2.7(赤で描く)。t3: A から約 8.7 /
         // B から約 3.5(緑で描く)。両者は ΔE 約 6.2 で別グループ

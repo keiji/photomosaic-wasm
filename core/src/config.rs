@@ -43,7 +43,9 @@ pub struct MosaicConfig {
     /// 類似タイルの同一視閾値 duplicate_detail(detail 差)。既定 4.0、範囲 0〜32。
     /// duplicate_de と併せて満たすときだけ同一視する(同色でも平坦/複雑は別物)
     pub duplicate_detail: f32,
-    /// 1 タイルの最大使用回数 usage_cap。既定 4 回、0 = 無制限
+    /// 1 グループの最大使用回数 usage_cap。既定 1 回、0 = 無制限。
+    /// no_reuse OFF のときは、全グループが上限に達するまで未使用グループだけを
+    /// 候補にし、到達後に usage をリセットして次の周期を開始する(ローリング)。
     pub usage_cap: u32,
     /// 同一特徴量グループの再利用を禁止する no_reuse。既定 true。
     /// true の場合、重複グループ(似た特徴量のタイル)は最大 1 回だけ使用され、
@@ -91,7 +93,7 @@ impl Default for MosaicConfig {
             improve_margin: 1.0,
             duplicate_de: 2.0,
             duplicate_detail: 4.0,
-            usage_cap: 4,
+            usage_cap: 1,
             no_reuse: true,
             color_correct: 0.85,
             main_blend: 0.2,
@@ -208,7 +210,7 @@ mod tests {
         assert_eq!(config.improve_margin, 1.0);
         assert_eq!(config.duplicate_de, 2.0);
         assert_eq!(config.duplicate_detail, 4.0);
-        assert_eq!(config.usage_cap, 4);
+        assert_eq!(config.usage_cap, 1);
         assert!(config.no_reuse);
         assert_eq!(config.color_correct, 0.85);
         assert_eq!(config.main_blend, 0.2);

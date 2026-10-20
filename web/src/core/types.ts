@@ -92,7 +92,7 @@ export interface MosaicConfig {
   duplicate_de: number;
   /** 類似タイルの同一視閾値(detail 差)。既定 4.0、範囲 0〜32 */
   duplicate_detail: number;
-  /** 1 タイルの最大使用回数。既定 4、0 = 無制限 */
+  /** 1 グループの最大使用回数。既定 1、0 = 無制限 */
   usage_cap: number;
   /** 似た特徴量のタイルグループを再利用しない。既定 true */
   no_reuse: boolean;

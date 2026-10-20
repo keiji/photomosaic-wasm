@@ -563,7 +563,11 @@ pub fn run_phases(
     let rgba = state
         .take_output()
         .expect("completed run must produce output");
-    let matches = assignments_to_matches(&state.take_assignments());
+    let assigned = state.take_assignments();
+    // 完了時は現割当表から usage を再集計する(wasm の step_run 完了時と同一)。
+    // ローリング中にリセットした usage を、最終的な割当全体の使用回数へ戻す
+    pool.recount_usage(&assigned);
+    let matches = assignments_to_matches(&assigned);
     Ok(RunOutput { matches, rgba })
 }
 
@@ -1177,6 +1181,8 @@ mod tests {
         let config = MosaicConfig {
             improve_margin: 1.0,
             no_reuse: false,
+            // 差し替え評価そのものを検証するため、ローリングの一巡制限を外す
+            usage_cap: 0,
             ..MosaicConfig::default()
         };
 

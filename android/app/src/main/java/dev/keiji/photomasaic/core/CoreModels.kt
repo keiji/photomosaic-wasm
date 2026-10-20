@@ -71,7 +71,7 @@ data class MosaicConfig(
     val improveMargin: Float = 1.0f,
     val duplicateDe: Float = 2.0f,
     val duplicateDetail: Float = 4.0f,
-    val usageCap: Int = 4,
+    val usageCap: Int = 1,
     val colorCorrect: Float = 0.85f,
     val mainBlend: Float = 0.2f,
     val rowBatch: Int = 8,

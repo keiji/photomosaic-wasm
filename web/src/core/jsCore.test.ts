@@ -243,6 +243,63 @@ describe('純 TypeScript コア', () => {
     expect(transparentBlocks).toBe(0);
   });
 
+  it('no_reuse OFF: グループプールを一巡するまで同じグループを再利用しない', async () => {
+    const core = createJsCore();
+    const config = await core.getConfig();
+    await core.setConfig({
+      ...config,
+      no_reuse: false,
+      usage_cap: 1,
+      color_correct: 0,
+      main_blend: 0,
+    });
+
+    // 1 列 4 ブロックのメイン画像。各ブロックは同じ灰色。
+    const width = 24;
+    const height = 96;
+    const mainData = new Uint8ClampedArray(width * height * 4);
+    for (let offset = 0; offset < mainData.length; offset += 4) {
+      mainData[offset] = 188;
+      mainData[offset + 1] = 188;
+      mainData[offset + 2] = 188;
+      mainData[offset + 3] = 255;
+    }
+    await core.setMainImage({ width, height, data: mainData });
+
+    // tile 1: 平坦な灰色(ブロックに最も近い)。合成色は赤。
+    await core.addTile(1n, featureThumb(188, 188, 188), composeThumb(24, 24, [255, 0, 0]));
+
+    // tile 2: 市松模様で detail が高い別グループ。合成色は緑。
+    const checker = new Uint8ClampedArray(32 * 32 * 4);
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 32; x++) {
+        const offset = (y * 32 + x) * 4;
+        const v = (x + y) % 2 === 0 ? 0 : 255;
+        checker[offset] = v;
+        checker[offset + 1] = v;
+        checker[offset + 2] = v;
+        checker[offset + 3] = 255;
+      }
+    }
+    await core.addTile(
+      2n,
+      { width: 32, height: 32, data: checker },
+      composeThumb(24, 24, [0, 255, 0]),
+    );
+
+    await core.run();
+    const exported = await core.exportImage();
+    const colors = [0, 1, 2, 3].map((index) => center(exported, 12, 12 + index * 24));
+    // 市松模様の tile 2 は identical_de の detail 優先で初回に選ばれ、
+    // 次に tile 1、一巡後に再び tile 2 → tile 1 の順で交互に採用される
+    expect(colors).toEqual([
+      [0, 255, 0],
+      [255, 0, 0],
+      [0, 255, 0],
+      [255, 0, 0],
+    ]);
+  });
+
   it('config: 既定値の往復と範囲外エラー', async () => {
     const core = createJsCore();
     const config = await core.getConfig();

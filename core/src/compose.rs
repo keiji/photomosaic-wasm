@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(out.len(), 32 * 32 * 4);
         assert_eq!(
             fnv1a64(&out),
-            0x0BFA_5DDB_2551_DF29, // 近さペナルティ(neighbor_de)の導入でマッチが変化
+            0x870A_7B4B_BD13_B389, // no_reuse OFF のグループプール一巡(ローリング)でマッチが変化
             "golden hash mismatch: inspect intentional spec changes and update this value"
         );
     }

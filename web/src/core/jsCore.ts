@@ -36,7 +36,7 @@ function defaultConfig(): MosaicConfig {
     improve_margin: 1.0,
     duplicate_de: 2.0,
     duplicate_detail: 4.0,
-    usage_cap: 4,
+    usage_cap: 1,
     no_reuse: true,
     color_correct: 0.85,
     main_blend: 0.2,

@@ -2,8 +2,11 @@
 //!
 //! - 各ブロックに対し、タイルプールから距離最小のタイルを選ぶ
 //!   `D = w_c * ΔE76 + w_d * |detail差| + λ * usage + n_p * nearness`
-//! - 使用ペナルティの λ でタイル群を均等に散らばらせ、全タイルの使用回数が
-//!   usage_cap に達したら一括リセットする(スタック防止)
+//! - 使用ペナルティの λ でタイル群を均等に散らばらせる。
+//!   `no_reuse` OFF ではグループプールを一巡するまで再利用せず、全グループが
+//!   `usage_cap` に達したら usage を一括リセットして次の周期を開始する
+//!   (既定 `usage_cap=1` のローリング方式)。`no_reuse` ON ではリセットせず、
+//!   一度使ったグループを再使用しない。
 //! - **重複グループ**(詳細設計書 4.4): 類似タイル(同一写真の複製・至近
 //!   バースト)は `duplicate_de` / `duplicate_detail` の閾値内で同一視され、
 //!   `usage` はグループ合計、usage_cap のリセット判定はグループ合計基準に
@@ -63,17 +66,29 @@ fn neighbor_nearness(
     nearness
 }
 
-/// no_reuse 時の候補を「未使用グループ」だけに絞る。
+/// 使用回数が上限 `limit` 未満のグループに候補を絞る。
 ///
+/// `limit=1` は「未使用グループのみ」、`limit=usage_cap` は「現在の周期で
+/// まだ使い切っていないグループのみ」を意味する。`limit=0` は無制限。
 /// `allow_id` は差し替え評価で現在割当を必ず評価対象に残すための例外。
-/// k-d 木の近傍候補がすべて使用済みでも未使用タイルが残っている場合があるため、
-/// 候補が空になったときは全タイルから未使用分を拾い直す。
-fn filter_no_reuse_candidates(pool: &TilePool, candidates: &mut Vec<u64>, allow_id: Option<u64>) {
-    candidates.retain(|id| Some(*id) == allow_id || pool.effective_usage(*id) == 0);
+/// k-d 木の近傍候補がすべて上限到達でも、未到達タイルが残っている場合があるため、
+/// 候補が空になったときは全タイルから未到達分を拾い直す。
+fn filter_candidates_below_usage(
+    pool: &TilePool,
+    candidates: &mut Vec<u64>,
+    allow_id: Option<u64>,
+    limit: u32,
+) {
+    if limit == 0 {
+        return;
+    }
+    candidates.retain(|id| Some(*id) == allow_id || pool.effective_usage(*id) < limit);
     if candidates.is_empty() {
         *candidates = pool
             .features()
-            .filter(|feature| Some(feature.id) == allow_id || pool.effective_usage(feature.id) == 0)
+            .filter(|feature| {
+                Some(feature.id) == allow_id || pool.effective_usage(feature.id) < limit
+            })
             .map(|feature| feature.id)
             .collect();
     }
@@ -168,9 +183,10 @@ pub fn match_unmatched_range(
             continue; // 確定済み(差分再マッチでは既存割当として隣接参照に使うのみ)
         }
 
-        // 全タイルの使用回数が usage_cap に達したら一括リセット(スタック防止)。
-        // no_reuse では一度使ったグループを再使用しないため、リセットしない
-        if !config.no_reuse && pool.all_usage_reached(config.usage_cap) {
+        // no_reuse OFF: 全グループが usage_cap に達したら usage を一括リセットし、
+        // グループプールを先頭から使い直す(ローリング)。
+        // no_reuse ON: 一度使ったグループを再使用しないため、リセットしない。
+        if !config.no_reuse && config.usage_cap > 0 && pool.all_usage_reached(config.usage_cap) {
             pool.reset_usage();
         }
 
@@ -195,9 +211,9 @@ pub fn match_unmatched_range(
         // 大量タイル(M7)では総当たりの代わりに k-d 木の近傍上位 32 件を候補と
         // する(usage・近さペナルティは候補取得後の再評価で反映する)
         let mut candidate_ids = pool.candidates_for(block, config);
-        if config.no_reuse {
-            filter_no_reuse_candidates(pool, &mut candidate_ids, None);
-        } else if candidate_ids.is_empty() {
+        let usage_limit = if config.no_reuse { 1 } else { config.usage_cap };
+        filter_candidates_below_usage(pool, &mut candidate_ids, None, usage_limit);
+        if usage_limit == 0 && candidate_ids.is_empty() {
             candidate_ids = pool.features().map(|f| f.id).collect();
         }
         let mut best: Option<(f32, TileFeature)> = None;
@@ -321,10 +337,14 @@ pub fn evaluate_swap_range(
         // (identical_de による detail 優先は初回マッチの規則)。
         // 大量タイル(M7)では k-d 木候補 + 現割当タイルを評価対象とする
         let mut candidate_ids = pool.candidates_for(block, config);
-        if config.no_reuse {
-            // 現在割当は「使用済み」だが、このブロックの評価対象としては許可する
-            filter_no_reuse_candidates(pool, &mut candidate_ids, Some(current_id));
-        } else if candidate_ids.is_empty() {
+        let usage_limit = if config.no_reuse { 1 } else { config.usage_cap };
+        if config.no_reuse || (usage_limit > 0 && !pool.all_usage_reached(usage_limit)) {
+            // 現在割当は「使用済み」でも、このブロックの評価対象としては許可する。
+            // no_reuse OFF で全グループが上限に達している場合はプールを一巡済みなので、
+            // フィルタせず次の周期の候補を評価する(usage はリセットしない)
+            filter_candidates_below_usage(pool, &mut candidate_ids, Some(current_id), usage_limit);
+        }
+        if candidate_ids.is_empty() && (!config.no_reuse || usage_limit == 0) {
             candidate_ids = pool.features().map(|f| f.id).collect();
         }
         if !candidate_ids.contains(&current_id) {
@@ -505,7 +525,7 @@ mod tests {
 
         let results = match_blocks(&blocks, 1, &mut pool, &config);
         assert_eq!(results.len(), 5);
-        // cap 到達 → 一括リセット後もマッチングが継続する(両タイルが選ばれ続ける)
+        // cap 到達 → 一括リセット後もマッチングが継続する(グループが選ばれ続ける)
         for result in &results {
             assert!(result.tile_id == 1 || result.tile_id == 2);
         }
@@ -562,22 +582,25 @@ mod tests {
     }
 
     #[test]
-    fn no_reuse_off_keeps_usage_cap_reset() {
-        // no_reuse = false では従来どおり usage_cap 到達でリセットされ、
-        // 同じタイルを繰り返し使える
+    fn no_reuse_off_rolls_group_pool_before_reuse() {
+        // no_reuse OFF + usage_cap=1: 2 グループを一巡するまで同じグループを
+        // 再利用しない。一巡後は usage をリセットして先頭から使い直す。
+        // A/B はブロックから等距離(ΔE 2.5)だが互いに ΔE 5.0 で別グループ。
         let target: [f32; 3] = [50.0, 0.0, 0.0];
-        let near: [f32; 3] = [50.5, 0.0, 0.0];
-        let blocks = uniform_blocks(target, 0.0, 3);
+        let near_a: [f32; 3] = [52.5, 0.0, 0.0];
+        let near_b: [f32; 3] = [47.5, 0.0, 0.0];
+        let blocks = uniform_blocks(target, 0.0, 4);
         let config = MosaicConfig {
             no_reuse: false,
             usage_cap: 1,
+            neighbor_penalty: 0.0,
             ..MosaicConfig::default()
         };
-        let mut pool = pool_with_tiles(&[(near, 0.0, 1)]);
+        let mut pool = pool_with_tiles(&[(near_a, 0.0, 1), (near_b, 0.0, 2)]);
 
         let results = match_blocks(&blocks, 1, &mut pool, &config);
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|result| result.tile_id == 1));
+        let ids: Vec<u64> = results.iter().map(|result| result.tile_id).collect();
+        assert_eq!(ids, vec![1, 2, 1, 2], "group pool must roll before reuse");
     }
 
     #[test]

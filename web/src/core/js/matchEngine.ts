@@ -3,6 +3,10 @@
  *
  * Rust コア(core/src/match_engine.rs)の移植。
  * 距離関数 D = w_c * ΔE76 + w_d * |detail差| + λ * usage + n_p * nearness。
+ *
+ * no_reuse OFF ではグループプールを一巡するまで再利用せず、全グループが
+ * usage_cap に達したら usage をリセットして次の周期を開始する(ローリング)。
+ * no_reuse ON ではリセットせず、一度使ったグループを再使用しない。
  */
 import type { MosaicConfig } from '../types';
 import { deltaE76, f32 } from './color';
@@ -16,24 +20,30 @@ export interface MatchResult {
 }
 
 /**
- * no_reuse 時の候補を「未使用グループ」だけに絞る。
+ * 使用回数が上限 `limit` 未満のグループに候補を絞る。
+ * `limit=1` は「未使用グループのみ」、`limit=usage_cap` は「現在の周期で
+ * まだ使い切っていないグループのみ」を意味する。`limit=0` は無制限。
  * `allowId` は差し替え評価で現在割当を評価対象に残すための例外。
- * k-d 木候補がすべて使用済みでも未使用タイルが残る場合があるため、
- * 候補が空なら全タイルから未使用分を拾い直す。
+ * k-d 木候補がすべて上限到達でも未到達タイルが残る場合があるため、
+ * 候補が空なら全タイルから未到達分を拾い直す。
  */
-function filterNoReuseCandidates(
+function filterCandidatesBelowUsage(
   pool: TilePool,
   candidateIds: bigint[],
   allowId: bigint | null,
+  limit: number,
 ): void {
-  const filtered = candidateIds.filter((id) => id === allowId || pool.effectiveUsage(id) === 0);
+  if (limit === 0) {
+    return;
+  }
+  const filtered = candidateIds.filter((id) => id === allowId || pool.effectiveUsage(id) < limit);
   if (filtered.length > 0) {
     candidateIds.splice(0, candidateIds.length, ...filtered);
     return;
   }
   const fallback = pool
     .featuresInOrder()
-    .filter((feature) => feature.id === allowId || pool.effectiveUsage(feature.id) === 0)
+    .filter((feature) => feature.id === allowId || pool.effectiveUsage(feature.id) < limit)
     .map((feature) => feature.id);
   candidateIds.splice(0, candidateIds.length, ...fallback);
 }
@@ -119,7 +129,10 @@ export function matchUnmatchedRange(
       continue;
     }
 
-    if (!config.no_reuse && pool.allUsageReached(config.usage_cap)) {
+    // no_reuse OFF: 全グループが usage_cap に達したら usage を一括リセットし、
+    // グループプールを先頭から使い直す(ローリング)。
+    // no_reuse ON: 一度使ったグループを再使用しないため、リセットしない。
+    if (!config.no_reuse && config.usage_cap > 0 && pool.allUsageReached(config.usage_cap)) {
       pool.resetUsage();
     }
 
@@ -131,9 +144,9 @@ export function matchUnmatchedRange(
     const neighborAbove = aboveId === null ? undefined : pool.feature(aboveId);
 
     let candidateIds = pool.candidatesFor(block, config);
-    if (config.no_reuse) {
-      filterNoReuseCandidates(pool, candidateIds, null);
-    } else if (candidateIds.length === 0) {
+    const usageLimit = config.no_reuse ? 1 : config.usage_cap;
+    filterCandidatesBelowUsage(pool, candidateIds, null, usageLimit);
+    if (usageLimit === 0 && candidateIds.length === 0) {
       candidateIds = pool.featuresInOrder().map((feature) => feature.id);
     }
 
@@ -216,9 +229,14 @@ export function evaluateSwapRange(
     );
 
     let candidateIds = pool.candidatesFor(block, config);
-    if (config.no_reuse) {
-      filterNoReuseCandidates(pool, candidateIds, currentId);
-    } else if (candidateIds.length === 0) {
+    const usageLimit = config.no_reuse ? 1 : config.usage_cap;
+    if (config.no_reuse || (usageLimit > 0 && !pool.allUsageReached(usageLimit))) {
+      // 現在割当は「使用済み」でも、このブロックの評価対象としては許可する。
+      // no_reuse OFF で全グループが上限に達している場合はプールを一巡済みなので、
+      // フィルタせず次の周期の候補を評価する(usage はリセットしない)
+      filterCandidatesBelowUsage(pool, candidateIds, currentId, usageLimit);
+    }
+    if (candidateIds.length === 0 && (!config.no_reuse || usageLimit === 0)) {
       candidateIds = pool.featuresInOrder().map((feature) => feature.id);
     }
     if (!candidateIds.includes(currentId)) {
