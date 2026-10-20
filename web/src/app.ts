@@ -35,7 +35,12 @@ import { setupFileZone } from './ui/dropZone';
 import { Preview } from './ui/preview';
 import { ProgressPanel } from './ui/progress';
 import { Controls } from './ui/controls';
-import { COLOR_CORRECT_DEFAULT, DUPLICATE_DE_DEFAULT, SAVE_FORMAT_DEFAULT } from './ui/controls';
+import {
+  COLOR_CORRECT_DEFAULT,
+  DUPLICATE_DE_DEFAULT,
+  NO_REUSE_DEFAULT,
+  SAVE_FORMAT_DEFAULT,
+} from './ui/controls';
 import { TileList } from './ui/tileList';
 import { MetricsOverlay } from './ui/metricsOverlay';
 
@@ -107,6 +112,7 @@ function applyMessages(): void {
   requireElement<HTMLElement>('#main-blend-label').textContent = messages.mainBlendLabel;
   requireElement<HTMLElement>('#color-correct-label').textContent = messages.colorCorrectLabel;
   requireElement<HTMLElement>('#duplicate-de-label').textContent = messages.duplicateDeLabel;
+  requireElement<HTMLElement>('#no-reuse-label').textContent = messages.noReuseLabel;
   requireElement<HTMLElement>('#save-format-label').textContent = messages.saveFormatLabel;
   requireElement<HTMLElement>('#preview-hint').textContent = messages.previewDropHint;
   requireElement<HTMLDivElement>('#preview-frame').setAttribute(
@@ -565,6 +571,13 @@ export async function startApp(
     await regenerateFull();
   });
 
+  // --- S2: 再利用禁止(M8 拡張)。似た特徴量のタイルを作品内で繰り返さない。
+  // 設定変更後はフル再生成する ---
+  controls.handleNoReuseChange(async (enabled) => {
+    await updateConfig({ no_reuse: enabled });
+    await regenerateFull();
+  });
+
   /**
    * 生成・差分再マッチの共通完了処理。
    * 呼び出し時点の世代で完了を判定する(実行中の変更要求は generation を
@@ -587,8 +600,13 @@ export async function startApp(
       store.dispatch({ type: 'GENERATION_FINISHED' });
       const data = store.getData();
       const total = data.totalBlocks ?? 0;
-      progress.setCounts(total, total);
+      progress.setCounts(data.assignedBlocks, total);
       progress.setPhase(messages.phaseDone);
+      const unfilled = Math.max(0, total - data.assignedBlocks);
+      if (unfilled > 0) {
+        // 再利用禁止で未使用タイルが尽きた場合など。ブロックは背景のまま残る
+        showError(messages.tilesInsufficient(unfilled));
+      }
       const img = await core.exportImage();
       preview.drawCompleted(img);
     } catch (err) {
@@ -698,6 +716,7 @@ export async function startApp(
     controls.setMainBlendValue(0.2);
     controls.setColorCorrectValue(COLOR_CORRECT_DEFAULT);
     controls.setDuplicateDeValue(DUPLICATE_DE_DEFAULT);
+    controls.setNoReuseValue(NO_REUSE_DEFAULT);
     controls.setSaveFormat(SAVE_FORMAT_DEFAULT);
     void (async () => {
       try {
@@ -705,6 +724,7 @@ export async function startApp(
           main_blend: 0.2,
           color_correct: COLOR_CORRECT_DEFAULT,
           duplicate_de: DUPLICATE_DE_DEFAULT,
+          no_reuse: NO_REUSE_DEFAULT,
         });
       } catch (err) {
         console.warn('config reset failed', err);

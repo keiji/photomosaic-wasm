@@ -17,6 +17,7 @@ const config: MosaicConfig = {
   duplicate_de: 2.0,
   duplicate_detail: 4.0,
   usage_cap: 4,
+  no_reuse: true,
   color_correct: 0.85,
   main_blend: 0.2,
   row_batch: 8,

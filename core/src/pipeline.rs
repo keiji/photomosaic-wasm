@@ -638,7 +638,10 @@ mod tests {
                 grid,
                 features,
                 rgba,
-                config: MosaicConfig::default(),
+                config: MosaicConfig {
+                    no_reuse: false,
+                    ..MosaicConfig::default()
+                },
             }
         }
     }
@@ -650,7 +653,10 @@ mod tests {
         let grid = crate::grid::compute_grid_info(96, 48, 24);
         let features = crate::grid::compute_block_features(&rgba, 96, 48, 24);
         let mut pool = setup_pool(4);
-        let config = MosaicConfig::default();
+        let config = MosaicConfig {
+            no_reuse: false,
+            ..MosaicConfig::default()
+        };
 
         let output =
             run_phases(&grid, &features, &mut pool, &config, &rgba).expect("run should succeed");
@@ -731,7 +737,10 @@ mod tests {
         // を計測し、緩い上限でリグレッション検知とする
         let rgba = test_image(1600, 1200);
         let mut pool = setup_pool(50);
-        let config = MosaicConfig::default();
+        let config = MosaicConfig {
+            no_reuse: false,
+            ..MosaicConfig::default()
+        };
 
         // 初回生成(24px)
         let grid = crate::grid::compute_grid_info(1600, 1200, 24);
@@ -1167,6 +1176,7 @@ mod tests {
         let block_lab = crate::color::srgb8_to_lab(127, 127, 127);
         let config = MosaicConfig {
             improve_margin: 1.0,
+            no_reuse: false,
             ..MosaicConfig::default()
         };
 
@@ -1252,7 +1262,10 @@ mod tests {
             ([(block_lab[0] + 10.0) as f32, 0.0, 0.0], 0.0, 1),
             ([(block_lab[0] + 12.0) as f32, 0.0, 0.0], 0.0, 2),
         ]);
-        let config = MosaicConfig::default();
+        let config = MosaicConfig {
+            no_reuse: false,
+            ..MosaicConfig::default()
+        };
         let output =
             run_phases(&grid, &features, &mut pool, &config, &rgba).expect("run should succeed");
         let assigned: Vec<Option<u64>> = output.matches.iter().map(|m| Some(m.tile_id)).collect();

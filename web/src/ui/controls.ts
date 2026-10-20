@@ -29,6 +29,9 @@ export const DUPLICATE_DE_MAX = 8;
 export const DUPLICATE_DE_STEP = 0.5;
 export const DUPLICATE_DE_DEFAULT = 2;
 
+/** 似た特徴量のタイルを再利用しない(既定 ON) */
+export const NO_REUSE_DEFAULT = true;
+
 /** 保存形式(M8・詳細設計書 4.7: 既定 PNG。JPEG 品質は 92) */
 export type SaveFormat = 'png' | 'jpeg';
 export const SAVE_FORMAT_DEFAULT: SaveFormat = 'png';
@@ -40,6 +43,7 @@ export class Controls {
   private readonly mainBlendSlider: HTMLInputElement;
   private readonly colorCorrectSlider: HTMLInputElement;
   private readonly duplicateDeSlider: HTMLInputElement;
+  private readonly noReuseCheckbox: HTMLInputElement;
   private readonly saveFormat: HTMLSelectElement;
   private readonly saveButton: HTMLButtonElement;
   private readonly backButton: HTMLButtonElement;
@@ -51,6 +55,7 @@ export class Controls {
   private onMainBlendChange: (value: number) => void = () => {};
   private onColorCorrectChange: (value: number) => void = () => {};
   private onDuplicateDeChange: (value: number) => void = () => {};
+  private onNoReuseChange: (enabled: boolean) => void = () => {};
   private pendingValue: number | null = null;
 
   constructor(root: HTMLElement) {
@@ -60,6 +65,7 @@ export class Controls {
     this.mainBlendSlider = this.require<HTMLInputElement>('#main-blend-slider');
     this.colorCorrectSlider = this.require<HTMLInputElement>('#color-correct-slider');
     this.duplicateDeSlider = this.require<HTMLInputElement>('#duplicate-de-slider');
+    this.noReuseCheckbox = this.require<HTMLInputElement>('#no-reuse-checkbox');
     this.saveFormat = this.require<HTMLSelectElement>('#save-format');
     this.saveButton = this.require<HTMLButtonElement>('#save-button');
     this.backButton = this.require<HTMLButtonElement>('#back-button');
@@ -88,6 +94,11 @@ export class Controls {
     // 重複制御(M8): 同一視グループの再構築を伴うため、確定時に再マッチ込みで再計算する
     this.duplicateDeSlider.addEventListener('change', () => {
       this.onDuplicateDeChange(Number(this.duplicateDeSlider.value));
+    });
+
+    // 再利用禁止: マッチング規則の変更なので、確定時にフル再生成する
+    this.noReuseCheckbox.addEventListener('change', () => {
+      this.onNoReuseChange(this.noReuseCheckbox.checked);
     });
   }
 
@@ -130,6 +141,16 @@ export class Controls {
   /** 重複制御確定(マウスを離した)のコールバックを登録する(M8) */
   handleDuplicateDeChange(handler: (value: number) => void): void {
     this.onDuplicateDeChange = handler;
+  }
+
+  /** 再利用禁止の表示値を設定する(イベント発火なし。リセット用) */
+  setNoReuseValue(enabled: boolean): void {
+    this.noReuseCheckbox.checked = enabled;
+  }
+
+  /** 再利用禁止の切り替えコールバックを登録する */
+  handleNoReuseChange(handler: (enabled: boolean) => void): void {
+    this.onNoReuseChange = handler;
   }
 
   /** 選択中の保存形式を返す(M8・保存時に参照する) */

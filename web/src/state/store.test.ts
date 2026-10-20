@@ -102,6 +102,19 @@ describe('AppStore', () => {
     });
   });
 
+  it('生成完了時も実際の割当ブロック数を保持する(タイル不足時)', () => {
+    const store = new AppStore();
+    store.dispatch({ type: 'MAIN_IMAGE_SET' });
+    store.setBlockCounts(10, 7);
+    store.dispatch({ type: 'GENERATION_STARTED' });
+    store.dispatch({ type: 'GENERATION_FINISHED' });
+    expect(store.getData()).toMatchObject({
+      state: 'DONE',
+      totalBlocks: 10,
+      assignedBlocks: 7,
+    });
+  });
+
   it('リセットで初期データへ戻る', () => {
     const store = new AppStore();
     store.dispatch({ type: 'MAIN_IMAGE_SET' });

@@ -37,6 +37,7 @@ function defaultConfig(): MosaicConfig {
     duplicate_de: 2.0,
     duplicate_detail: 4.0,
     usage_cap: 4,
+    no_reuse: true,
     color_correct: 0.85,
     main_blend: 0.2,
     row_batch: 8,
@@ -80,6 +81,9 @@ function validateConfig(config: MosaicConfig): void {
   finiteInRange(config.duplicate_de, 0.5, 8.0, 'duplicate_de');
   finiteInRange(config.duplicate_detail, 0.0, 32.0, 'duplicate_detail');
   nonNegativeInteger(config.usage_cap, 'usage_cap');
+  if (typeof config.no_reuse !== 'boolean') {
+    throw new Error("config field 'no_reuse' must be a boolean");
+  }
   finiteInRange(config.color_correct, 0.0, 1.0, 'color_correct');
   finiteInRange(config.main_blend, 0.0, 0.8, 'main_blend');
   if (!Number.isInteger(config.row_batch) || config.row_batch < 4 || config.row_batch > 32) {

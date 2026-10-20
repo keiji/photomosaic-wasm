@@ -45,6 +45,10 @@ pub struct MosaicConfig {
     pub duplicate_detail: f32,
     /// 1 タイルの最大使用回数 usage_cap。既定 4 回、0 = 無制限
     pub usage_cap: u32,
+    /// 同一特徴量グループの再利用を禁止する no_reuse。既定 true。
+    /// true の場合、重複グループ(似た特徴量のタイル)は最大 1 回だけ使用され、
+    /// 未使用タイルがなくなったブロックは未確定のまま残る(背景)。
+    pub no_reuse: bool,
     /// ブロック平均色へのトーン補正強度 α(color_correct)。既定 0.85、範囲 0〜1.0。
     /// 0.7 → 0.85 への引き上げは、タイル代表色の周囲重み付き平均化(詳細設計書
     /// 4.3)と組み合わせて背景の継ぎ目・粒状感(つぶつぶ)を抑える趣旨
@@ -88,6 +92,7 @@ impl Default for MosaicConfig {
             duplicate_de: 2.0,
             duplicate_detail: 4.0,
             usage_cap: 4,
+            no_reuse: true,
             color_correct: 0.85,
             main_blend: 0.2,
             row_batch: 8,
@@ -204,6 +209,7 @@ mod tests {
         assert_eq!(config.duplicate_de, 2.0);
         assert_eq!(config.duplicate_detail, 4.0);
         assert_eq!(config.usage_cap, 4);
+        assert!(config.no_reuse);
         assert_eq!(config.color_correct, 0.85);
         assert_eq!(config.main_blend, 0.2);
         assert_eq!(config.row_batch, 8);
@@ -315,6 +321,7 @@ mod tests {
             duplicate_de: 0.5,
             duplicate_detail: 0.0,
             usage_cap: 0,
+            no_reuse: false,
             color_correct: 1.0,
             main_blend: 0.0,
             row_batch: 32,

@@ -255,7 +255,8 @@ export function set_block_size(px: number): JsGridInfo;
 
 /**
  * 設定 JSON でパラメータを上書きする(詳細設計書 2 章 setConfig)。
- * すべてのフィールドが必須。詳細設計書 5 章の範囲外はエラーになる
+ * すべてのフィールドが必須(no_reuse は省略時 true)。詳細設計書 5 章の
+ * 範囲外はエラーになる
  */
 export function set_config(json: string): void;
 

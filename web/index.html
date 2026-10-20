@@ -106,6 +106,13 @@
             <input type="range" id="duplicate-de-slider" min="0.5" max="8" step="0.5" value="2" />
           </div>
 
+          <!-- 再利用禁止: 似た特徴量のタイルを同じ作品内で繰り返さない。
+               既定 ON。タイルが足りないブロックは背景のまま残る -->
+          <div id="no-reuse-section" class="control-row">
+            <label for="no-reuse-checkbox" id="no-reuse-label"></label>
+            <input type="checkbox" id="no-reuse-checkbox" checked />
+          </div>
+
           <!-- フォトモザイク一括生成(M4)。GENERATING 中はキャンセル操作(M5) -->
           <div id="generate-section" class="control-row">
             <button

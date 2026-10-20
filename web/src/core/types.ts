@@ -94,6 +94,8 @@ export interface MosaicConfig {
   duplicate_detail: number;
   /** 1 タイルの最大使用回数。既定 4、0 = 無制限 */
   usage_cap: number;
+  /** 似た特徴量のタイルグループを再利用しない。既定 true */
+  no_reuse: boolean;
   /** 色補正強度 α。既定 0.85、範囲 0〜1.0(分母はタイルの周囲重み付き代表色) */
   color_correct: number;
   /** メイン画像ブレンドの不透明度。既定 0.2、範囲 0〜0.8(詳細設計書 4.6) */

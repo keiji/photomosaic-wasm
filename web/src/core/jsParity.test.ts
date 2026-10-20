@@ -338,10 +338,14 @@ describe.skipIf(!hasWasmBinary)('純 TypeScript コアと WASM コアのパリ�
   });
 
   it('設定の既定値が一致する', async () => {
-    const wasmConfig = JSON.parse(wasm.get_config()) as Record<string, number>;
+    const wasmConfig = JSON.parse(wasm.get_config()) as Record<string, number | boolean>;
     const jsConfig = await createJsCore().getConfig();
     for (const [key, value] of Object.entries(jsConfig)) {
-      expect(wasmConfig[key]).toBeCloseTo(value, 5);
+      if (typeof value === 'boolean') {
+        expect(wasmConfig[key]).toBe(value);
+      } else {
+        expect(wasmConfig[key]).toBeCloseTo(value, 5);
+      }
     }
   });
 });

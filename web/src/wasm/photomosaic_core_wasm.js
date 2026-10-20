@@ -693,7 +693,8 @@ export function set_block_size(px) {
 
 /**
  * 設定 JSON でパラメータを上書きする(詳細設計書 2 章 setConfig)。
- * すべてのフィールドが必須。詳細設計書 5 章の範囲外はエラーになる
+ * すべてのフィールドが必須(no_reuse は省略時 true)。詳細設計書 5 章の
+ * 範囲外はエラーになる
  * @param {string} json
  */
 export function set_config(json) {
@@ -771,6 +772,11 @@ export function step_run(now_ms) {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg___wbindgen_boolean_get_5b446f51afd21013: function(arg0) {
+            const v = getObject(arg0);
+            const ret = typeof(v) === 'boolean' ? v : undefined;
+            return isLikeNone(ret) ? 0xFFFFFF : ret ? 1 : 0;
+        },
         __wbg___wbindgen_debug_string_4687d8d8c2017d52: function(arg0, arg1) {
             const ret = debugString(getObject(arg1));
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);

@@ -162,7 +162,9 @@ export class AppStore {
         // 実ブロック数は setMainImage 完了後に setBlockCounts で反映する
         return { ...base, assignedBlocks: 0 };
       case 'GENERATION_FINISHED':
-        return { ...base, assignedBlocks: data.totalBlocks ?? data.assignedBlocks };
+        // 再利用禁止でタイルが尽きた場合、assignedBlocks < totalBlocks のまま
+        // 完了する。進捗表示と不足ブロック案内のため実数を保持する
+        return base;
       case 'RESET':
         return { ...initialStoreData };
       default:

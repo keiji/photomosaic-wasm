@@ -192,6 +192,7 @@ describe('純 TypeScript コア', () => {
 
   it('rematch: タイル追加後に差分再マッチして出力が追従する', async () => {
     const core = createJsCore();
+    await core.setConfig({ ...(await core.getConfig()), no_reuse: false });
     await core.setMainImage(redBlueMain());
     await core.addTile(1n, featureThumb(40, 0, 0), composeThumb(64, 64, [40, 0, 0]));
     await core.run();
@@ -204,10 +205,49 @@ describe('純 TypeScript コア', () => {
     expect(center(after, 36, 12)[0]).toBeLessThan(55);
   });
 
+  it('no_reuse: 似た特徴量のタイルを1回だけ使い、余ったブロックは背景にする', async () => {
+    const core = createJsCore();
+    await core.setMainImage({
+      width: 48,
+      height: 48,
+      data: new Uint8ClampedArray(48 * 48 * 4),
+    });
+    await core.addTile(1n, featureThumb(255, 0, 0), composeThumb(64, 64, [255, 0, 0]));
+    await core.addTile(2n, featureThumb(0, 0, 255), composeThumb(64, 64, [0, 0, 255]));
+
+    await core.run();
+    let exported = await core.exportImage();
+    let transparentBlocks = 0;
+    for (let by = 0; by < 2; by++) {
+      for (let bx = 0; bx < 2; bx++) {
+        const offset = ((by * 24 + 12) * 48 + (bx * 24 + 12)) * 4;
+        if (exported.data[offset + 3] === 0) {
+          transparentBlocks += 1;
+        }
+      }
+    }
+    expect(transparentBlocks).toBe(2);
+
+    await core.setConfig({ ...(await core.getConfig()), no_reuse: false });
+    await core.run();
+    exported = await core.exportImage();
+    transparentBlocks = 0;
+    for (let by = 0; by < 2; by++) {
+      for (let bx = 0; bx < 2; bx++) {
+        const offset = ((by * 24 + 12) * 48 + (bx * 24 + 12)) * 4;
+        if (exported.data[offset + 3] === 0) {
+          transparentBlocks += 1;
+        }
+      }
+    }
+    expect(transparentBlocks).toBe(0);
+  });
+
   it('config: 既定値の往復と範囲外エラー', async () => {
     const core = createJsCore();
     const config = await core.getConfig();
     expect(config.w_c).toBe(1.0);
+    expect(config.no_reuse).toBe(true);
     expect(config.row_batch).toBe(8);
 
     await core.setConfig({ ...config, color_correct: 0.5, row_batch: 4 });
@@ -227,6 +267,9 @@ describe('純 TypeScript コア', () => {
     );
     await expect(core.setConfig({ ...config, main_blend: 0.9 })).rejects.toThrow(/main_blend/);
     await expect(core.setConfig({ ...config, neighbor_de: 1.5 })).rejects.toThrow(/neighbor_de/);
+    await expect(core.setConfig({ ...config, no_reuse: 1 as unknown as boolean })).rejects.toThrow(
+      /no_reuse/,
+    );
     // 失敗した set は既存設定を壊さない
     expect((await core.getConfig()).color_correct).toBe(0.5);
   });

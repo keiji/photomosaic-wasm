@@ -15,6 +15,29 @@ export interface MatchResult {
   tileId: bigint;
 }
 
+/**
+ * no_reuse 時の候補を「未使用グループ」だけに絞る。
+ * `allowId` は差し替え評価で現在割当を評価対象に残すための例外。
+ * k-d 木候補がすべて使用済みでも未使用タイルが残る場合があるため、
+ * 候補が空なら全タイルから未使用分を拾い直す。
+ */
+function filterNoReuseCandidates(
+  pool: TilePool,
+  candidateIds: bigint[],
+  allowId: bigint | null,
+): void {
+  const filtered = candidateIds.filter((id) => id === allowId || pool.effectiveUsage(id) === 0);
+  if (filtered.length > 0) {
+    candidateIds.splice(0, candidateIds.length, ...filtered);
+    return;
+  }
+  const fallback = pool
+    .featuresInOrder()
+    .filter((feature) => feature.id === allowId || pool.effectiveUsage(feature.id) === 0)
+    .map((feature) => feature.id);
+  candidateIds.splice(0, candidateIds.length, ...fallback);
+}
+
 /** 候補タイルと直上・直左タイルの近さ(0.0..=1.0) */
 export function neighborNearness(
   tile: TileFeature,
@@ -96,7 +119,7 @@ export function matchUnmatchedRange(
       continue;
     }
 
-    if (pool.allUsageReached(config.usage_cap)) {
+    if (!config.no_reuse && pool.allUsageReached(config.usage_cap)) {
       pool.resetUsage();
     }
 
@@ -108,7 +131,9 @@ export function matchUnmatchedRange(
     const neighborAbove = aboveId === null ? undefined : pool.feature(aboveId);
 
     let candidateIds = pool.candidatesFor(block, config);
-    if (candidateIds.length === 0) {
+    if (config.no_reuse) {
+      filterNoReuseCandidates(pool, candidateIds, null);
+    } else if (candidateIds.length === 0) {
       candidateIds = pool.featuresInOrder().map((feature) => feature.id);
     }
 
@@ -191,9 +216,12 @@ export function evaluateSwapRange(
     );
 
     let candidateIds = pool.candidatesFor(block, config);
-    if (candidateIds.length === 0) {
+    if (config.no_reuse) {
+      filterNoReuseCandidates(pool, candidateIds, currentId);
+    } else if (candidateIds.length === 0) {
       candidateIds = pool.featuresInOrder().map((feature) => feature.id);
-    } else if (!candidateIds.includes(currentId)) {
+    }
+    if (!candidateIds.includes(currentId)) {
       candidateIds.push(currentId);
       candidateIds.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     }

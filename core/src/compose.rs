@@ -750,7 +750,10 @@ mod tests {
                 .expect("tile registration should succeed");
         }
 
-        let config = MosaicConfig::default();
+        let config = MosaicConfig {
+            no_reuse: false,
+            ..MosaicConfig::default()
+        };
         pool.reset_usage();
         let matches = crate::match_engine::match_blocks(&features, grid.cols, &mut pool, &config);
         let assignments: Vec<Option<u64>> = matches.iter().map(|m| Some(m.tile_id)).collect();

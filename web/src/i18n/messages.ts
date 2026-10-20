@@ -38,6 +38,8 @@ export const messages = {
   colorCorrectLabel: '色補正の強さ',
   /** 重複制御のスライダー(M8・詳細設計書 4.4 重複グループ。数値は表示しない) */
   duplicateDeLabel: '重複とみなす色の近さ',
+  /** 似た特徴量のタイルを作品内で繰り返さない(既定 ON) */
+  noReuseLabel: '同じ写真を繰り返さない',
   /** 保存形式の選択(詳細設計書 4.7: 既定 PNG) */
   saveFormatLabel: '保存形式',
   /** プレビューの操作案内(クリック/ドロップでメイン画像を変更) */
@@ -87,6 +89,9 @@ export const messages = {
   errorStartup: 'アプリケーションの起動に失敗しました(詳細は開発者コンソールを参照)',
   tilesPartiallyAdded: (added: number, rejected: number): string =>
     `${added} 枚を追加しました(${rejected} 枚は読み込めずスキップしました)`,
+  /** 再利用禁止でタイルが足りず、未配置のブロックが残ったときの案内 */
+  tilesInsufficient: (unfilled: number): string =>
+    `タイルが足りないため、${unfilled.toLocaleString('ja-JP')} ブロックは背景のまま残りました(画像を追加するか、ブロックサイズを大きくしてください)`,
   errorMemoryGuard:
     '構成画像の合計サイズが上限に達したため、追加を停止しました(不要なタイルを削除してください)',
 } as const;

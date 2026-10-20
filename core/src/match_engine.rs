@@ -63,6 +63,22 @@ fn neighbor_nearness(
     nearness
 }
 
+/// no_reuse 時の候補を「未使用グループ」だけに絞る。
+///
+/// `allow_id` は差し替え評価で現在割当を必ず評価対象に残すための例外。
+/// k-d 木の近傍候補がすべて使用済みでも未使用タイルが残っている場合があるため、
+/// 候補が空になったときは全タイルから未使用分を拾い直す。
+fn filter_no_reuse_candidates(pool: &TilePool, candidates: &mut Vec<u64>, allow_id: Option<u64>) {
+    candidates.retain(|id| Some(*id) == allow_id || pool.effective_usage(*id) == 0);
+    if candidates.is_empty() {
+        *candidates = pool
+            .features()
+            .filter(|feature| Some(feature.id) == allow_id || pool.effective_usage(feature.id) == 0)
+            .map(|feature| feature.id)
+            .collect();
+    }
+}
+
 /// 1 ブロックに対する距離評価(詳細設計書 4.4 の距離関数)。
 ///
 /// `neighbor_nearness` は直上・直左タイルとの近さ(0.0..=1.0)。
@@ -152,8 +168,9 @@ pub fn match_unmatched_range(
             continue; // 確定済み(差分再マッチでは既存割当として隣接参照に使うのみ)
         }
 
-        // 全タイルの使用回数が usage_cap に達したら一括リセット(スタック防止)
-        if pool.all_usage_reached(config.usage_cap) {
+        // 全タイルの使用回数が usage_cap に達したら一括リセット(スタック防止)。
+        // no_reuse では一度使ったグループを再使用しないため、リセットしない
+        if !config.no_reuse && pool.all_usage_reached(config.usage_cap) {
             pool.reset_usage();
         }
 
@@ -178,7 +195,9 @@ pub fn match_unmatched_range(
         // 大量タイル(M7)では総当たりの代わりに k-d 木の近傍上位 32 件を候補と
         // する(usage・近さペナルティは候補取得後の再評価で反映する)
         let mut candidate_ids = pool.candidates_for(block, config);
-        if candidate_ids.is_empty() {
+        if config.no_reuse {
+            filter_no_reuse_candidates(pool, &mut candidate_ids, None);
+        } else if candidate_ids.is_empty() {
             candidate_ids = pool.features().map(|f| f.id).collect();
         }
         let mut best: Option<(f32, TileFeature)> = None;
@@ -222,7 +241,10 @@ pub fn match_unmatched_range(
             }
         }
 
-        let chosen_tile = near_best.or(best).expect("pool is non-empty").1;
+        let Some(chosen_tile) = near_best.or(best).map(|(_, tile)| tile) else {
+            // no_reuse で未使用タイルが尽きた: ブロックは未確定のまま残す
+            continue;
+        };
         pool.bump_usage(chosen_tile.id);
         assigned[i] = Some(chosen_tile.id);
         matched.push(block_index);
@@ -299,9 +321,13 @@ pub fn evaluate_swap_range(
         // (identical_de による detail 優先は初回マッチの規則)。
         // 大量タイル(M7)では k-d 木候補 + 現割当タイルを評価対象とする
         let mut candidate_ids = pool.candidates_for(block, config);
-        if candidate_ids.is_empty() {
+        if config.no_reuse {
+            // 現在割当は「使用済み」だが、このブロックの評価対象としては許可する
+            filter_no_reuse_candidates(pool, &mut candidate_ids, Some(current_id));
+        } else if candidate_ids.is_empty() {
             candidate_ids = pool.features().map(|f| f.id).collect();
-        } else if !candidate_ids.contains(&current_id) {
+        }
+        if !candidate_ids.contains(&current_id) {
             // 差し替え評価の基準となる現割当が候補外に漏れると
             // 改善判定が実際より良くなる(現割当が評価対象外に漏れる)ため必ず含める
             candidate_ids.push(current_id);
@@ -472,6 +498,7 @@ mod tests {
         let blocks = uniform_blocks(target, 0.0, 5);
         let config = MosaicConfig {
             usage_cap: 1,
+            no_reuse: false,
             ..MosaicConfig::default()
         };
         let mut pool = pool_with_tiles(&[(near_a, 0.0, 1), (near_b, 0.0, 2)]);
@@ -493,6 +520,95 @@ mod tests {
     }
 
     #[test]
+    fn no_reuse_uses_each_group_once_and_leaves_blocks_unfilled() {
+        // 2 枚の別グループのタイルに 4 ブロック。no_reuse では各グループを
+        // 1 回ずつ使い、残り 2 ブロックは未確定(背景)のまま残る
+        let target: [f32; 3] = [50.0, 0.0, 0.0];
+        let red: [f32; 3] = [53.0, 80.0, 67.0];
+        let green: [f32; 3] = [87.0, -86.0, 83.0];
+        let blocks = uniform_blocks(target, 5.0, 4);
+        let config = MosaicConfig {
+            no_reuse: true,
+            usage_cap: 1,
+            ..MosaicConfig::default()
+        };
+        let mut pool = pool_with_tiles(&[(red, 5.0, 1), (green, 5.0, 2)]);
+
+        let results = match_blocks(&blocks, 1, &mut pool, &config);
+        assert_eq!(results.len(), 2, "only two unique groups are usable");
+        assert_ne!(
+            results[0].tile_id, results[1].tile_id,
+            "each group must be used at most once"
+        );
+    }
+
+    #[test]
+    fn no_reuse_treats_similar_features_as_one_group() {
+        // 特徴量が近い 2 枚は同一グループ。no_reuse では片方を使った時点で
+        // もう片方も使用済み扱いになり、2 ブロック目は埋まらない
+        let target: [f32; 3] = [50.0, 0.0, 0.0];
+        let near_a: [f32; 3] = [50.0, 0.0, 0.0];
+        let near_b: [f32; 3] = [50.5, 0.0, 0.0];
+        let blocks = uniform_blocks(target, 0.0, 2);
+        let config = MosaicConfig {
+            no_reuse: true,
+            ..MosaicConfig::default()
+        };
+        let mut pool = pool_with_tiles(&[(near_a, 0.0, 1), (near_b, 0.0, 2)]);
+
+        let results = match_blocks(&blocks, 1, &mut pool, &config);
+        assert_eq!(results.len(), 1, "similar features share one group");
+        assert_eq!(pool.group_of(1), pool.group_of(2));
+    }
+
+    #[test]
+    fn no_reuse_off_keeps_usage_cap_reset() {
+        // no_reuse = false では従来どおり usage_cap 到達でリセットされ、
+        // 同じタイルを繰り返し使える
+        let target: [f32; 3] = [50.0, 0.0, 0.0];
+        let near: [f32; 3] = [50.5, 0.0, 0.0];
+        let blocks = uniform_blocks(target, 0.0, 3);
+        let config = MosaicConfig {
+            no_reuse: false,
+            usage_cap: 1,
+            ..MosaicConfig::default()
+        };
+        let mut pool = pool_with_tiles(&[(near, 0.0, 1)]);
+
+        let results = match_blocks(&blocks, 1, &mut pool, &config);
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|result| result.tile_id == 1));
+    }
+
+    #[test]
+    fn no_reuse_swap_does_not_use_another_blocks_tile() {
+        // ブロック 0 の現割当 tile 1 は評価対象として許可するが、別ブロックで
+        // 使用済みの tile 2 は候補から除外する。tile 2 が色として最良でも
+        // 再利用してはならない
+        let target: [f32; 3] = [50.0, 0.0, 0.0];
+        let current: [f32; 3] = [55.0, 0.0, 0.0]; // ΔE 5
+        let used_elsewhere: [f32; 3] = [50.5, 0.0, 0.0]; // ΔE 0.5
+        let unused: [f32; 3] = [60.0, 0.0, 0.0]; // ΔE 10
+        let blocks = uniform_blocks(target, 0.0, 2);
+        let config = MosaicConfig {
+            no_reuse: true,
+            ..MosaicConfig::default()
+        };
+        let mut pool = pool_with_tiles(&[
+            (current, 0.0, 1),
+            (used_elsewhere, 0.0, 2),
+            (unused, 0.0, 3),
+        ]);
+        pool.bump_usage(1);
+        pool.bump_usage(2);
+        let mut assigned: Vec<Option<u64>> = vec![Some(1), Some(2)];
+
+        let swapped = evaluate_swap_range(&blocks, 1, &mut pool, &config, &mut assigned, 0, 1);
+        assert!(swapped.is_empty(), "must not reuse tile 2");
+        assert_eq!(assigned[0], Some(1));
+    }
+
+    #[test]
     fn usage_cap_zero_is_unlimited() {
         // usage_cap = 0 は無制限(リセットが行われない)
         let target: [f32; 3] = [50.0, 0.0, 0.0];
@@ -500,6 +616,7 @@ mod tests {
         let blocks = uniform_blocks(target, 0.0, 10);
         let config = MosaicConfig {
             usage_cap: 0,
+            no_reuse: false,
             ..MosaicConfig::default()
         };
         let mut pool = pool_with_tiles(&[(near, 0.0, 1)]);
@@ -645,7 +762,10 @@ mod tests {
         let dup_b: [f32; 3] = [50.0, 0.0, 0.0]; // ΔE76 = 3.0(A とは 0.2 → 同一グループ)
         let distinct: [f32; 3] = [56.1, 0.0, 0.0]; // ΔE76 = 3.1(A とは 5.9 → 別グループ)
         let blocks = uniform_blocks(target, 0.0, 3);
-        let config = MosaicConfig::default();
+        let config = MosaicConfig {
+            no_reuse: false,
+            ..MosaicConfig::default()
+        };
 
         let mut pool = pool_with_tiles(&[(dup_a, 0.0, 1), (dup_b, 0.0, 2), (distinct, 0.0, 3)]);
         // 前提: 1 と 2 は同一視、1 と 3 は別グループ
@@ -699,7 +819,10 @@ mod tests {
             ([53.0, 2.0, -2.0], 5.0, 3),
         ];
         let blocks = uniform_blocks(target, 4.0, 12);
-        let config = MosaicConfig::default();
+        let config = MosaicConfig {
+            no_reuse: false,
+            ..MosaicConfig::default()
+        };
 
         let whole = {
             let mut pool = pool_with_tiles(&tiles);
@@ -733,7 +856,10 @@ mod tests {
         let target: [f32; 3] = [50.0, 0.5, -0.5];
         let tiles = [([50.5, 0.0, 0.0], 1.0, 1), ([50.0, 1.0, -1.0], 0.5, 2)];
         let blocks = uniform_blocks(target, 2.0, 16);
-        let config = MosaicConfig::default();
+        let config = MosaicConfig {
+            no_reuse: false,
+            ..MosaicConfig::default()
+        };
 
         let mut assigned: Vec<Option<u64>> = (0..16_u64).map(|i| Some(i + 100)).collect();
         let mut pool = pool_with_tiles(&tiles);
@@ -793,7 +919,10 @@ mod tests {
     fn match_unmatched_range_out_of_bounds_is_clamped() {
         let blocks = uniform_blocks([50.0, 0.0, 0.0], 0.0, 4);
         let mut pool = pool_with_tiles(&[([50.5, 0.0, 0.0], 0.0, 1)]);
-        let config = MosaicConfig::default();
+        let config = MosaicConfig {
+            no_reuse: false,
+            ..MosaicConfig::default()
+        };
         // 範囲が窓外(開始 > 終了、block_end > 全体)でも安全にクランプされる
         let mut assigned: Vec<Option<u64>> = vec![None; 4];
         let results = match_unmatched_range(&blocks, 2, &mut pool, &config, &mut assigned, 4, 10);

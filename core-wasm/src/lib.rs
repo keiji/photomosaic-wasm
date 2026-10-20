@@ -670,7 +670,8 @@ pub fn get_config() -> Result<String, JsValue> {
 }
 
 /// 設定 JSON でパラメータを上書きする(詳細設計書 2 章 setConfig)。
-/// すべてのフィールドが必須。詳細設計書 5 章の範囲外はエラーになる
+/// すべてのフィールドが必須(no_reuse は省略時 true)。詳細設計書 5 章の
+/// 範囲外はエラーになる
 #[wasm_bindgen]
 pub fn set_config(json: String) -> Result<(), JsValue> {
     let parsed = js_sys::JSON::parse(&json).map_err(|_| js_error("config JSON is invalid"))?;
@@ -699,6 +700,17 @@ pub fn set_config(json: String) -> Result<(), JsValue> {
                 ))
             })
     };
+    let bool_field = |key: &str| -> Result<bool, JsValue> {
+        let field = js_sys::Reflect::get(value, &key.into())
+            .map_err(|_| js_error("config JSON is invalid"))?;
+        // 旧クライアント(Android など)が no_reuse を送らない場合は既定 true
+        if field.is_undefined() {
+            return Ok(true);
+        }
+        field
+            .as_bool()
+            .ok_or_else(|| js_error(&format!("config field '{key}' must be a boolean")))
+    };
     let config = MosaicConfig {
         w_c: f32_field("w_c")?,
         w_d: f32_field("w_d")?,
@@ -711,6 +723,7 @@ pub fn set_config(json: String) -> Result<(), JsValue> {
         duplicate_detail: f32_field("duplicate_detail")?,
         main_blend: f32_field("main_blend")?,
         usage_cap: u32_field("usage_cap")?,
+        no_reuse: bool_field("no_reuse")?,
         color_correct: f32_field("color_correct")?,
         row_batch: u32_field("row_batch")?,
     };
@@ -746,6 +759,8 @@ fn config_to_json(config: &MosaicConfig) -> Result<String, JsValue> {
         js_sys::Reflect::set(obj.as_ref(), &key.into(), &value.into())
             .map_err(|_| js_error("failed to serialize config"))?;
     }
+    js_sys::Reflect::set(obj.as_ref(), &"no_reuse".into(), &config.no_reuse.into())
+        .map_err(|_| js_error("failed to serialize config"))?;
     js_sys::JSON::stringify(obj.as_ref())
         .map_err(|_| js_error("failed to serialize config"))?
         .as_string()

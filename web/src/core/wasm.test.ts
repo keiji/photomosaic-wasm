@@ -7,7 +7,7 @@
  */
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import * as wasm from '../wasm/photomosaic_core_wasm.js';
 
 const wasmBinaryUrl = new URL('../wasm/photomosaic_core_wasm_bg.wasm', import.meta.url);
@@ -229,9 +229,9 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
     });
 
     it('getConfig/setConfig が往復し、範囲外はエラーになる', () => {
-      const config = JSON.parse(wasm.get_config()) as Record<string, number>;
+      const config = JSON.parse(wasm.get_config()) as Record<string, number | boolean>;
       // f32 経由の丸め(0.85 → 0.8499999...)を許容して既定値を検証する
-      const expected: Record<string, number> = {
+      const expected: Record<string, number | boolean> = {
         w_c: 1.0,
         w_d: 0.25,
         usage_penalty: 0.35,
@@ -242,18 +242,31 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
         duplicate_de: 2.0,
         duplicate_detail: 4.0,
         usage_cap: 4,
+        no_reuse: true,
         color_correct: 0.85,
         main_blend: 0.2,
         row_batch: 8,
       };
       for (const [key, value] of Object.entries(expected)) {
-        expect(config[key]).toBeCloseTo(value, 5);
+        if (typeof value === 'boolean') {
+          expect(config[key]).toBe(value);
+        } else {
+          expect(config[key]).toBeCloseTo(value, 5);
+        }
       }
 
       wasm.set_config(JSON.stringify({ ...config, color_correct: 0.5, row_batch: 4 }));
       const updated = JSON.parse(wasm.get_config()) as Record<string, number>;
       expect(updated.color_correct).toBeCloseTo(0.5, 5);
       expect(updated.row_batch).toBe(4);
+
+      // no_reuse の ON/OFF 往復と、旧クライアントの省略時既定 true
+      wasm.set_config(JSON.stringify({ ...config, no_reuse: false }));
+      expect((JSON.parse(wasm.get_config()) as Record<string, boolean>).no_reuse).toBe(false);
+      const withoutNoReuse = { ...config };
+      delete withoutNoReuse.no_reuse;
+      wasm.set_config(JSON.stringify(withoutNoReuse));
+      expect((JSON.parse(wasm.get_config()) as Record<string, boolean>).no_reuse).toBe(true);
 
       // 復元: default へ戻す(後続テストは既定設定を前提とする)
       wasm.set_config(JSON.stringify(expected));
@@ -278,6 +291,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
       expect(() => wasm.set_config(JSON.stringify({ ...config, neighbor_de: 1.5 }))).toThrow(
         /neighbor_de/,
       );
+      expect(() => wasm.set_config(JSON.stringify({ ...config, no_reuse: 1 }))).toThrow(/no_reuse/);
       // 失敗した set は既存設定(既定へ復元済み)を壊さない
       expect(JSON.parse(wasm.get_config()).color_correct).toBeCloseTo(0.85, 5);
       expect(JSON.parse(wasm.get_config()).improve_margin).toBeCloseTo(1.0, 5);
@@ -384,6 +398,14 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
   });
 
   describe('差分再マッチ(M6: タイル追加・削除の追随)', () => {
+    // この describe の既存テストは従来の再利用前提(usage ペナルティ)を
+    // 検証するため、no_reuse を明示的に OFF にしてから復元する
+    let savedConfig: string;
+    beforeEach(() => {
+      savedConfig = wasm.get_config();
+      wasm.set_config(JSON.stringify({ ...JSON.parse(savedConfig), no_reuse: false }));
+    });
+
     /** 単色の特徴量サムネイル(32×32)を生成する */
     const featureThumb = (r: number, g: number, b: number): Uint8Array => {
       const data = new Uint8Array(32 * 32 * 4);
@@ -448,6 +470,7 @@ describe.skipIf(!hasWasmBinary)('WASM バインディング(core-wasm 生成物)
     };
 
     afterEach(() => {
+      wasm.set_config(savedConfig);
       wasm.clear_tiles();
       wasm.clear_main_image();
     });
