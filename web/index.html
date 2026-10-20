@@ -79,14 +79,15 @@
           </div>
 
           <!-- メイン画像ブレンド(詳細設計書 4.6): 元画像を重ねる不透明度。
-               数値は表示せず、ドラッグ確定(マウスを離した)時に再計算する -->
+               右側に現在値を表示し、ドラッグ確定(マウスを離した)時に再計算する -->
           <div id="main-blend-section" class="control-row">
             <label for="main-blend-slider" id="main-blend-label"></label>
             <input type="range" id="main-blend-slider" min="0" max="0.8" step="0.05" value="0.2" />
+            <output id="main-blend-value" for="main-blend-slider"></output>
           </div>
 
           <!-- 色補正強度(M8・詳細設計書 4.6/5 章 α): タイルのトーンをブロック平均色へ
-               寄せる強さ。数値は表示せず、ドラッグ確定(マウスを離した)時に再計算する -->
+               寄せる強さ。右側に現在値を表示し、ドラッグ確定(マウスを離した)時に再計算する -->
           <div id="color-correct-section" class="control-row">
             <label for="color-correct-slider" id="color-correct-label"></label>
             <input
@@ -97,13 +98,15 @@
               step="0.05"
               value="0.85"
             />
+            <output id="color-correct-value" for="color-correct-slider"></output>
           </div>
 
           <!-- 重複制御(M8・詳細設計書 4.4/5 章 duplicate_de): 似たタイルを同一視する
-               代表色の距離。数値は表示せず、ドラッグ確定(マウスを離した)時に再計算する -->
+               代表色の距離。右側に現在値を表示し、ドラッグ確定(マウスを離した)時に再計算する -->
           <div id="duplicate-section" class="control-row">
             <label for="duplicate-de-slider" id="duplicate-de-label"></label>
             <input type="range" id="duplicate-de-slider" min="0.5" max="8" step="0.5" value="2" />
+            <output id="duplicate-de-value" for="duplicate-de-slider"></output>
           </div>
 
           <!-- 再利用禁止: 似た特徴量のタイルを同じ作品内で繰り返さない。
@@ -112,6 +115,7 @@
             <label for="no-reuse-checkbox" id="no-reuse-label"></label>
             <input type="checkbox" id="no-reuse-checkbox" checked />
           </div>
+          <p id="no-reuse-note" class="control-note"></p>
 
           <!-- フォトモザイク一括生成(M4)。GENERATING 中はキャンセル操作(M5) -->
           <div id="generate-section" class="control-row">

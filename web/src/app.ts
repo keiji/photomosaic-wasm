@@ -113,6 +113,7 @@ function applyMessages(): void {
   requireElement<HTMLElement>('#color-correct-label').textContent = messages.colorCorrectLabel;
   requireElement<HTMLElement>('#duplicate-de-label').textContent = messages.duplicateDeLabel;
   requireElement<HTMLElement>('#no-reuse-label').textContent = messages.noReuseLabel;
+  requireElement<HTMLElement>('#no-reuse-note').textContent = messages.noReuseNote;
   requireElement<HTMLElement>('#save-format-label').textContent = messages.saveFormatLabel;
   requireElement<HTMLElement>('#preview-hint').textContent = messages.previewDropHint;
   requireElement<HTMLDivElement>('#preview-frame').setAttribute(

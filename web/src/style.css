@@ -294,6 +294,12 @@ body {
   color: var(--color-text-dim);
 }
 
+.control-note {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+  color: var(--color-text-dim);
+}
+
 /* --- 進捗表示領域 --- */
 #progress-section {
   margin-top: 16px;
